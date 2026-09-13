@@ -115,6 +115,8 @@ func cmdServe(args []string) {
 			os.Exit(2)
 		}
 
+		opts.Conns = server.NewConnRegistry()
+
 		ctx := context.Background()
 		panelStore, perr := server.NewPanelUserStore(ctx, server.PanelConfig{
 			APIHost:      *panelURL,
@@ -122,6 +124,7 @@ func cmdServe(args []string) {
 			Token:        token,
 			PullInterval: *panelPull,
 			PushInterval: *panelPush,
+			Conns:        opts.Conns,
 		})
 		if perr != nil {
 			fmt.Fprintln(os.Stderr, "error:", perr)

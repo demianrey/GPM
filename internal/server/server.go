@@ -68,6 +68,64 @@ type Options struct {
 	PortProvider func(ctx context.Context) (int, error)
 	// PortCheckInterval: cada cuánto consultar PortProvider. Default 60s.
 	PortCheckInterval time.Duration
+	// Conns rastrea las conexiones SSH activas por uuid, para poder
+	// cortarlas en caliente cuando un usuario deja de estar autorizado
+	// (cuota agotada, vigencia vencida) -- ver ConnRegistry.Kick, usado por
+	// PanelUserStore en modo panel. Si es nil, Run crea uno internamente
+	// (el registro en sí no hace nada solo -- alguien tiene que llamar
+	// Kick, que es lo que hace PanelUserStore al perder de vista un uuid
+	// en un pull).
+	Conns *ConnRegistry
+}
+
+// ConnRegistry rastrea qué conexiones SSH activas corresponden a cada uuid,
+// para poder cerrarlas en caliente cuando el usuario deja de estar
+// autorizado. Sin esto, quitar a un usuario de la lista del panel (cuota
+// agotada, vigencia vencida) solo bloquea RECONEXIONES -- una sesión ya
+// abierta se queda viva indefinidamente mientras el cliente no la cierre
+// él mismo (y no tiene ningún incentivo para hacerlo).
+type ConnRegistry struct {
+	mu    sync.Mutex
+	conns map[string]map[*ssh.ServerConn]struct{}
+}
+
+func NewConnRegistry() *ConnRegistry {
+	return &ConnRegistry{conns: map[string]map[*ssh.ServerConn]struct{}{}}
+}
+
+func (r *ConnRegistry) add(uuid string, conn *ssh.ServerConn) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.conns[uuid] == nil {
+		r.conns[uuid] = map[*ssh.ServerConn]struct{}{}
+	}
+	r.conns[uuid][conn] = struct{}{}
+}
+
+func (r *ConnRegistry) remove(uuid string, conn *ssh.ServerConn) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if m, ok := r.conns[uuid]; ok {
+		delete(m, conn)
+		if len(m) == 0 {
+			delete(r.conns, uuid)
+		}
+	}
+}
+
+// Kick cierra TODAS las conexiones SSH activas de un uuid (si tiene
+// alguna) y devuelve cuántas cerró. Cada conexión cerrada dispara su
+// propio cleanup normal en handleConn (cierre de canales, etc), como
+// cualquier desconexión.
+func (r *ConnRegistry) Kick(uuid string) int {
+	r.mu.Lock()
+	conns := r.conns[uuid]
+	delete(r.conns, uuid)
+	r.mu.Unlock()
+	for conn := range conns {
+		_ = conn.Close()
+	}
+	return len(conns)
 }
 
 // Usage acumula bytes de subida/bajada por uuid desde la última vez que se
@@ -129,6 +187,11 @@ func Run(opts Options) error {
 		usage = NewUsage()
 	}
 
+	conns := opts.Conns
+	if conns == nil {
+		conns = NewConnRegistry()
+	}
+
 	config := &ssh.ServerConfig{
 		// Auth "none" real de SSH (RFC 4252): el cliente no manda password
 		// ni llave, el servidor autentica solo con el username -- el UUID
@@ -168,7 +231,7 @@ func Run(opts Options) error {
 					acceptErrCh <- err
 					return
 				}
-				go handleConn(rawConn, config, usage, opts.UdpgwAddr)
+				go handleConn(rawConn, config, usage, conns, opts.UdpgwAddr)
 			}
 		}()
 
@@ -278,7 +341,7 @@ const decoyIdleGap = 80 * time.Millisecond
 // de reenviar la conexión. En ambos casos hablamos nosotros primero.
 const decoyPeekTimeout = 400 * time.Millisecond
 
-func handleConn(rawConn net.Conn, config *ssh.ServerConfig, usage *Usage, udpgwAddr string) {
+func handleConn(rawConn net.Conn, config *ssh.ServerConfig, usage *Usage, conns *ConnRegistry, udpgwAddr string) {
 	defer rawConn.Close()
 
 	br := bufio.NewReader(rawConn)
@@ -329,6 +392,9 @@ func handleConn(rawConn net.Conn, config *ssh.ServerConfig, usage *Usage, udpgwA
 	uuid := sshConn.Permissions.Extensions["uuid"]
 	name := sshConn.Permissions.Extensions["name"]
 	log.Printf("conectado: uuid=%s (%s) desde %s", uuid, name, rawConn.RemoteAddr())
+
+	conns.add(uuid, sshConn)
+	defer conns.remove(uuid, sshConn)
 
 	go ssh.DiscardRequests(reqs)
 

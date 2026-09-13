@@ -35,6 +35,13 @@ type PanelConfig struct {
 	// NodeTypeOverride reemplaza el "GPM" default del query param node_type,
 	// por si hace falta apuntar a un panel con otra convención.
 	NodeTypeOverride string
+	// Conns, si no es nil, se usa para CORTAR en caliente las conexiones de
+	// cualquier uuid que desaparezca de un pull (cuota agotada, vigencia
+	// vencida, usuario borrado) -- sin esto, quitar a alguien de la lista
+	// del panel solo bloquea reconexiones, una sesión ya abierta se queda
+	// viva indefinidamente. Mismo comportamiento que RemoveUser+
+	// LinkManager.CloseAll() en v2node.
+	Conns *ConnRegistry
 
 	HTTPClient *http.Client
 }
@@ -52,8 +59,9 @@ type PanelUserStore struct {
 	http     *http.Client
 	nodeType string
 
-	mu    sync.RWMutex
-	users map[string]panelUserEntry // uuid -> entry
+	mu     sync.RWMutex
+	users  map[string]panelUserEntry // uuid -> entry
+	pulled bool                      // false hasta el primer pullOnce exitoso
 }
 
 // NewPanelUserStore hace una sincronización inicial BLOQUEANTE (para que el
@@ -157,10 +165,29 @@ func (s *PanelUserStore) pullOnce(ctx context.Context) error {
 	}
 
 	s.mu.Lock()
+	previous := s.users
 	s.users = users
+	firstPull := !s.pulled
+	s.pulled = true
 	s.mu.Unlock()
 
 	log.Printf("panel: %d usuarios sincronizados", len(users))
+
+	// Cortar en caliente a cualquiera que haya desaparecido (cuota
+	// agotada, vigencia vencida, usuario borrado) -- sin esto, solo se
+	// bloquean RECONEXIONES, una sesión ya abierta se queda viva. Se
+	// salta en el primer pull (no hay "antes" real con qué comparar, y
+	// nadie tuvo tiempo de conectarse todavía).
+	if s.cfg.Conns != nil && !firstPull {
+		for uuid := range previous {
+			if _, stillThere := users[uuid]; !stillThere {
+				if n := s.cfg.Conns.Kick(uuid); n > 0 {
+					log.Printf("panel: %s ya no está autorizado -- %d conexión(es) cortada(s)", uuid, n)
+				}
+			}
+		}
+	}
+
 	return nil
 }
 
