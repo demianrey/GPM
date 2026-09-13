@@ -69,6 +69,33 @@ También hay binarios precompilados para Linux (amd64/arm64) en cada
 [release](https://github.com/demianrey/GPM/releases), generados por el
 GitHub Action (`.github/workflows/build.yml`).
 
+### Instalación con systemd (recomendado en producción)
+
+Igual que [v2node](https://github.com/wyx2685/v2node): un instalador que
+descarga el binario, arma el servicio systemd y deja un comando de
+administración (`gpm-cli`) con menú interactivo para start/stop/restart/
+logs/etc, sin tener que acordarse de flags ni de `journalctl` a mano.
+
+```
+bash <(curl -Ls https://raw.githubusercontent.com/demianrey/GPM/main/script/install.sh)
+```
+
+Pide interactivamente: puerto, modo (panel o manual), y si es panel la
+URL/node-id/Communication Key (el token se guarda en
+`/usr/local/gpm/panel-token`, 0600, nunca en el comando). Después de
+instalado:
+
+```
+gpm-cli            # menú interactivo
+gpm-cli restart     # o directo por subcomando: start/stop/restart/status/log/enable/disable/config/update/uninstall
+```
+
+`gpm-cli config` abre `/usr/local/gpm/gpm.conf` (los flags de `gpm serve`,
+como variable de entorno `GPM_ARGS`) y reinicia el servicio al guardar.
+`gpm-cli log` sigue `journalctl -u gpm -f` en vivo. El servicio ya viene
+con `-panel-port-sync` activo (ver más abajo) -- si cambias el puerto desde
+el panel, GPM se reinicia solo, sin que haga falta tocar nada aquí.
+
 ## Uso — modo manual
 
 Este es el único modo implementado por ahora. El servidor lee la lista de
@@ -174,6 +201,11 @@ Endpoints usados:
 - `POST /api/v1/server/UniProxy/push` — reporta subida/bajada acumulada por
   usuario cada `-panel-push-interval` (default 60s), como delta desde el
   último reporte (no acumulado histórico).
+- `GET /api/v2/server/config` — se consulta cada `-panel-port-check-interval`
+  (default 60s) solo para leer `server_port`. Si cambia respecto al puerto
+  actual, GPM cierra el listener viejo y abre uno nuevo ahí mismo, sin
+  reiniciar el proceso -- igual que hace v2node, ver `-panel-port-sync`
+  (activo por default, desactivable).
 
 Arquitectura: `server.Run` recibe cualquier implementación de
 `server.UserStore` (interfaz de una sola función,
@@ -182,9 +214,6 @@ Arquitectura: `server.Run` recibe cualquier implementación de
 sin que el resto del servidor sepa de dónde salen los usuarios.
 
 **Pendiente:**
-- `GET /api/v2/server/config` (para leer puerto desde el panel en vez de
-  `-addr`) — el módulo del panel ya expone `server_port` en un `case 'gpm'`,
-  pero GPM todavía no lo llama.
 - Reporte de usuarios online (`UniProxy/alive`/`alivelist`) — implementado
   del lado panel (CacheKey `SERVER_GPM_ONLINE_USER`), no implementado del
   lado GPM todavía.
