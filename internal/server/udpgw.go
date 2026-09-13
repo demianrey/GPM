@@ -24,9 +24,21 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
+
+// udpgwFlushInterval: el canal udpgw dura TODA la sesión VPN (un solo
+// canal multiplexa todos los flujos UDP, a diferencia de TCP donde cada
+// conexión es su propio canal que abre y cierra seguido). Sin un flush
+// periódico, el consumo UDP -- que en un teléfono moderno puede ser la
+// mayoría del tráfico real, vía QUIC -- no le llega al panel hasta que el
+// usuario desconecta del todo. Como el chequeo de cuota del panel
+// (`u+d < transfer_enable` en cada pull de /UniProxy/user) es la ÚNICA
+// aplicación de límite que existe, sin esto un usuario conectado por días
+// podría consumir muy por encima de su plan sin que el panel lo detecte.
+const udpgwFlushInterval = 30 * time.Second
 
 const (
 	udpgwFlagKeepalive = 1 << 0
@@ -123,6 +135,17 @@ func handleUdpgwChannel(channel ssh.Channel, uuid, name string, usage *Usage) {
 	var writeMu sync.Mutex
 	var up, down int64
 
+	// Flush periódico mientras el canal sigue vivo (ver udpgwFlushInterval)
+	// -- no basta con reportar solo al cerrar, este canal dura toda la
+	// sesión VPN.
+	flushDone := make(chan struct{})
+	var flushWG sync.WaitGroup
+	flushWG.Add(1)
+	go func() {
+		defer flushWG.Done()
+		flushUdpgwUsage(uuid, usage, &up, &down, flushDone)
+	}()
+
 	var pfMu sync.Mutex
 	portForwards := map[uint16]*udpgwPortForward{}
 	var relayWG sync.WaitGroup
@@ -193,7 +216,42 @@ func handleUdpgwChannel(channel ssh.Channel, uuid, name string, usage *Usage) {
 	pfMu.Unlock()
 	relayWG.Wait()
 
-	finalUp, finalDown := atomic.LoadInt64(&up), atomic.LoadInt64(&down)
-	usage.Add(uuid, finalUp, finalDown)
-	log.Printf("[%s] udpgw embebido cerrado, subida=%dB bajada=%dB", name, finalUp, finalDown)
+	close(flushDone)
+	flushWG.Wait() // asegura que el tramo final (desde el último tick) ya se reportó
+
+	log.Printf("[%s] udpgw embebido cerrado, subida total=%dB bajada total=%dB", name, atomic.LoadInt64(&up), atomic.LoadInt64(&down))
+}
+
+// flushUdpgwUsage reporta el consumo acumulado en incrementos (no solo al
+// final) mientras el canal udpgw sigue abierto. up/down son punteros a los
+// contadores ATÓMICOS acumulativos que va incrementando handleUdpgwChannel
+// -- aquí solo se leen y se reporta el DELTA desde el último flush (Usage.Add
+// suma, no reemplaza, así que reportar el total de nuevo en cada tick
+// duplicaría el consumo).
+func flushUdpgwUsage(uuid string, usage *Usage, up, down *int64, done <-chan struct{}) {
+	ticker := time.NewTicker(udpgwFlushInterval)
+	defer ticker.Stop()
+
+	var lastUp, lastDown int64
+	flush := func() {
+		curUp := atomic.LoadInt64(up)
+		curDown := atomic.LoadInt64(down)
+		deltaUp := curUp - lastUp
+		deltaDown := curDown - lastDown
+		if deltaUp > 0 || deltaDown > 0 {
+			usage.Add(uuid, deltaUp, deltaDown)
+			log.Printf("udpgw: flush parcial uuid=%s subida=%dB bajada=%dB", uuid, deltaUp, deltaDown)
+		}
+		lastUp, lastDown = curUp, curDown
+	}
+
+	for {
+		select {
+		case <-ticker.C:
+			flush()
+		case <-done:
+			flush() // último tramo, sin esperar al siguiente tick
+			return
+		}
+	}
 }
