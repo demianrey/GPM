@@ -71,6 +71,8 @@ func cmdServe(args []string) {
 	panelTokenFile := fs.String("panel-token-file", "", "modo panel: archivo con el Communication Key (recomendado, permisos 0600, sin salto de línea al final o se recorta solo)")
 	panelPull := fs.Duration("panel-pull-interval", 60*time.Second, "modo panel: cada cuánto sincronizar la lista de usuarios")
 	panelPush := fs.Duration("panel-push-interval", 60*time.Second, "modo panel: cada cuánto reportar consumo")
+	panelPortSync := fs.Bool("panel-port-sync", true, "modo panel: seguir el puerto configurado en el nodo del panel (/api/v2/server/config), reiniciando el listener solo si cambia -- igual que v2node")
+	panelPortCheck := fs.Duration("panel-port-check-interval", 60*time.Second, "modo panel: cada cuánto consultar el puerto del nodo en el panel")
 	fs.Parse(args)
 
 	usingPanel := *panelURL != ""
@@ -128,6 +130,11 @@ func cmdServe(args []string) {
 		opts.Users = panelStore
 		opts.Usage = server.NewUsage()
 		go panelStore.RunUsageReporter(ctx, opts.Usage)
+
+		if *panelPortSync {
+			opts.PortProvider = panelStore.FetchNodePort
+			opts.PortCheckInterval = *panelPortCheck
+		}
 	}
 
 	if err := server.Run(opts); err != nil {

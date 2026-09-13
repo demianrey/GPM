@@ -105,6 +105,21 @@ func (s *PanelUserStore) Lookup(uuid string) (string, bool) {
 	return fmt.Sprintf("panel-uid-%d", e.ID), true
 }
 
+// FetchNodePort lee /api/v2/server/config y devuelve el server_port que
+// tiene configurado el nodo en el panel -- mismo endpoint que usa v2node
+// para leer su propia config, aquí solo se usa el campo de puerto (el resto
+// de la config de ese endpoint, protocolo/TLS/etc, no aplica a GPM). Pensado
+// para pasarse como Options.PortProvider en server.Run.
+func (s *PanelUserStore) FetchNodePort(ctx context.Context) (int, error) {
+	var body struct {
+		ServerPort int `json:"server_port"`
+	}
+	if err := s.getJSON(ctx, "/api/v2/server/config", &body); err != nil {
+		return 0, err
+	}
+	return body.ServerPort, nil
+}
+
 func (s *PanelUserStore) pullLoop(ctx context.Context) {
 	ticker := time.NewTicker(s.cfg.PullInterval)
 	defer ticker.Stop()

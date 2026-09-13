@@ -12,6 +12,7 @@ package server
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha1"
@@ -23,6 +24,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -55,6 +57,17 @@ type Options struct {
 	// cliente pidiendo UDP recibiría un intento de conexión real fallido a
 	// esa dirección, como cualquier otro destino inexistente).
 	UdpgwAddr string
+	// PortProvider, si no es nil, se consulta periódicamente (cada
+	// PortCheckInterval) para saber en qué puerto GPM DEBERÍA estar
+	// escuchando -- ej. leyendo /api/v2/server/config del panel, igual que
+	// hace v2node. Si devuelve un puerto distinto al actual, Run() cierra
+	// el listener viejo y abre uno nuevo ahí, sin necesidad de reiniciar el
+	// proceso (systemd/el operador no tiene que intervenir cuando cambian
+	// el puerto desde el admin). El host (interfaz) de Options.Addr se
+	// mantiene fijo -- solo el puerto es dinámico.
+	PortProvider func(ctx context.Context) (int, error)
+	// PortCheckInterval: cada cuánto consultar PortProvider. Default 60s.
+	PortCheckInterval time.Duration
 }
 
 // Usage acumula bytes de subida/bajada por uuid desde la última vez que se
@@ -134,18 +147,92 @@ func Run(opts Options) error {
 	}
 	config.AddHostKey(hostKey)
 
-	listener, err := net.Listen("tcp", opts.Addr)
+	host, port, err := net.SplitHostPort(opts.Addr)
 	if err != nil {
-		return fmt.Errorf("listen: %w", err)
+		return fmt.Errorf("Options.Addr inválido (%q): %w", opts.Addr, err)
 	}
-	log.Println("GPM escuchando en", opts.Addr, "(protocolo SSH, auth por UUID)")
 
 	for {
-		rawConn, err := listener.Accept()
+		addr := net.JoinHostPort(host, port)
+		listener, err := net.Listen("tcp", addr)
 		if err != nil {
+			return fmt.Errorf("listen en %s: %w", addr, err)
+		}
+		log.Println("GPM escuchando en", addr, "(protocolo SSH, auth por UUID)")
+
+		acceptErrCh := make(chan error, 1)
+		go func() {
+			for {
+				rawConn, err := listener.Accept()
+				if err != nil {
+					acceptErrCh <- err
+					return
+				}
+				go handleConn(rawConn, config, usage, opts.UdpgwAddr)
+			}
+		}()
+
+		var restartCh <-chan string
+		var stopWatch func()
+		if opts.PortProvider != nil {
+			ch := make(chan string, 1)
+			ctx, cancel := context.WithCancel(context.Background())
+			go watchPort(ctx, opts.PortProvider, port, opts.PortCheckInterval, ch)
+			restartCh = ch
+			stopWatch = cancel
+		}
+
+		select {
+		case newPort := <-restartCh:
+			if stopWatch != nil {
+				stopWatch()
+			}
+			_ = listener.Close()
+			log.Println("GPM: el panel cambió el puerto a", newPort, "-- reiniciando el listener")
+			port = newPort
+			continue
+		case err := <-acceptErrCh:
+			if stopWatch != nil {
+				stopWatch()
+			}
 			return fmt.Errorf("accept: %w", err)
 		}
-		go handleConn(rawConn, config, usage, opts.UdpgwAddr)
+	}
+}
+
+// watchPort consulta provider cada interval (default 60s) y manda por ch el
+// puerto nuevo la PRIMERA vez que difiere del actual, luego se detiene (Run
+// vuelve a lanzar un watchPort fresco al reiniciar el listener). Errores de
+// PortProvider se loguean y se ignoran -- un panel caído momentáneamente no
+// debe tirar el servidor.
+func watchPort(ctx context.Context, provider func(context.Context) (int, error), current string, interval time.Duration, ch chan<- string) {
+	if interval <= 0 {
+		interval = 60 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			port, err := provider(ctx)
+			if err != nil {
+				log.Println("GPM: error consultando puerto del panel:", err)
+				continue
+			}
+			if port <= 0 {
+				continue
+			}
+			newPort := strconv.Itoa(port)
+			if newPort != current {
+				select {
+				case ch <- newPort:
+				default:
+				}
+				return
+			}
+		}
 	}
 }
 
