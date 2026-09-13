@@ -92,6 +92,12 @@ mkdir -p "$NODE_DIR"
 read -rp "Puerto donde escuchar [80]: " gpm_port
 gpm_port=${gpm_port:-80}
 read -rp "Dirección udpgw embebida [127.0.0.1:7300, vacío para desactivar]: " udpgw_addr
+read -rp "¿Este nodo está detrás de un CDN tipo Cloudflare? [Y/n]: " gpm_cdn
+if [[ "$gpm_cdn" == "n" || "$gpm_cdn" == "N" ]]; then
+    gpm_cdn_json="false"
+else
+    gpm_cdn_json="true"
+fi
 
 if [[ "$gpm_mode" == "2" ]]; then
     touch "${NODE_DIR}/users.json"
@@ -101,6 +107,7 @@ if [[ "$gpm_mode" == "2" ]]; then
   "addr": ":${gpm_port}",
   "hostkey": "${NODE_DIR}/host_key.pem",
   "udpgwAddr": "${udpgw_addr}",
+  "cdn": ${gpm_cdn_json},
   "users": "${NODE_DIR}/users.json"
 }
 EOF
@@ -116,6 +123,7 @@ else
   "addr": ":${gpm_port}",
   "hostkey": "${NODE_DIR}/host_key.pem",
   "udpgwAddr": "${udpgw_addr}",
+  "cdn": ${gpm_cdn_json},
   "panel": {
     "url": "${panel_url}",
     "nodeId": ${node_id},

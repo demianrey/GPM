@@ -32,14 +32,19 @@ fork de Xray-core), que ya implementa el mismo señuelo del lado cliente.
 3. Si hay señuelo, GPM lo drena **por inactividad**: espera hasta que el
    cliente deja de mandar bytes nuevos (con un margen que tolera etapas
    `[split]` separadas por unos milisegundos), y ahí responde con
-   `HTTP/1.1 101 Switching Protocols`. Esto es intencional y no arbitrario:
-   nuestro propio cliente (y los de apps reales tipo HTTP Injector) mandan
-   el señuelo y se quedan esperando esta respuesta antes de mandar su
-   banner SSH — si el servidor esperara ver el banner del cliente antes de
-   responder, ambos lados se quedarían esperando el uno al otro. Y el `101`
-   específicamente importa cuando el destino real está detrás de un CDN
-   real (Cloudflare, Fastly): sin ese status, el CDN da la petición por
-   terminada y no relaya nada más.
+   `HTTP/1.1 101 Switching Protocols` o `HTTP/1.1 200 OK` según el nodo esté
+   detrás de un CDN o no (`-cdn`/`"cdn"` en `-config`, default `true` = 101).
+   Esto no es arbitrario en ninguno de los dos casos: nuestro propio cliente
+   (y los de apps reales tipo HTTP Injector) mandan el señuelo y se quedan
+   esperando esta respuesta antes de mandar su banner SSH — si el servidor
+   esperara ver el banner del cliente antes de responder, ambos lados se
+   quedarían esperando el uno al otro. El `101` específicamente importa
+   cuando el destino real está detrás de un CDN real (Cloudflare, Fastly):
+   sin ese status, el CDN da la petición por terminada y no relaya nada más.
+   Sin CDN de por medio (conexión directa), no hace falta simular ningún
+   upgrade — un `200` llano es el camuflaje más discreto, igual que hace
+   `open.py` de SSHPlus en su modo directo (`proxy.py`, el modo con CDN,
+   siempre usa `101`).
 4. Una vez respondido (o de entrada, si no había señuelo), arranca el
    handshake SSH real. GPM manda su banner primero, lo cual además es lo
    que evita cualquier bloqueo mutuo con el otro lado.
@@ -120,6 +125,7 @@ un reinicio del proceso, sin que haga falta tocar nada aquí.
 {
   "addr": ":80",
   "hostkey": "/etc/gpm/1/host_key.pem",
+  "cdn": true,
   "panel": {
     "url": "https://tu-panel.com",
     "nodeId": 1,

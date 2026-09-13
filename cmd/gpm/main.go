@@ -61,6 +61,7 @@ func cmdServe(args []string) {
 	addr := fs.String("addr", ":2222", "dirección:puerto donde escuchar, ej. :80 o 0.0.0.0:8022")
 	hostKeyPath := fs.String("hostkey", "", "archivo donde persistir la host key RSA (vacío = efímera, nueva en cada arranque)")
 	udpgwAddr := fs.String("udpgw-addr", "127.0.0.1:7300", "dirección virtual para soporte UDP embebido (protocolo udpgw) -- debe coincidir con el udpgwAddress del perfil cliente. Vacío = deshabilitado")
+	cdn := fs.Bool("cdn", true, "el nodo está detrás de un CDN tipo Cloudflare -- si true, el señuelo responde 101 (lo que el CDN necesita para pasar a modo túnel crudo); si false (conexión directa, sin CDN), responde 200")
 
 	// Modo manual.
 	usersPath := fs.String("users", "", "modo manual: archivo JSON de usuarios permitidos (uuid -> nombre)")
@@ -88,10 +89,16 @@ func cmdServe(args []string) {
 		os.Exit(2)
 	}
 
+	decoyStatus := 101
+	if !*cdn {
+		decoyStatus = 200
+	}
+
 	opts := server.Options{
 		Addr:        *addr,
 		HostKeyPath: *hostKeyPath,
 		UdpgwAddr:   *udpgwAddr,
+		DecoyStatus: decoyStatus,
 	}
 
 	var err error
@@ -166,10 +173,16 @@ func serveFromConfig(path string) {
 		os.Exit(2)
 	}
 
+	decoyStatus := 101
+	if cfg.Cdn != nil && !*cfg.Cdn {
+		decoyStatus = 200
+	}
+
 	opts := server.Options{
 		Addr:        cfg.Addr,
 		HostKeyPath: cfg.HostKeyPath,
 		UdpgwAddr:   cfg.UdpgwAddr,
+		DecoyStatus: decoyStatus,
 	}
 
 	if usingManual {

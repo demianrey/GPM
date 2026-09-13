@@ -16,6 +16,12 @@ type fileConfig struct {
 	Addr        string `json:"addr"`
 	HostKeyPath string `json:"hostkey"`
 	UdpgwAddr   string `json:"udpgwAddr,omitempty"`
+	// Cdn indica si el nodo está detrás de un CDN tipo Cloudflare -- default
+	// true (nil se trata como true). Decide qué status responde el señuelo:
+	// 101 si true (lo que el CDN necesita para pasar a modo túnel crudo), o
+	// 200 si false (conexión directa, sin nada esperando un upgrade a
+	// WebSocket) -- ver Options.DecoyStatus en internal/server.
+	Cdn *bool `json:"cdn,omitempty"`
 
 	// Modo manual (mutuamente excluyente con Panel).
 	UsersPath string `json:"users,omitempty"`

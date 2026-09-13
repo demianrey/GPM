@@ -82,6 +82,13 @@ type Options struct {
 	// Kick, que es lo que hace PanelUserStore al perder de vista un uuid
 	// en un pull).
 	Conns *ConnRegistry
+	// DecoyStatus es el status HTTP que se responde al señuelo: 101 (default,
+	// 0 se trata como 101) para nodos detrás de un CDN tipo Cloudflare, que
+	// solo pasa a modo túnel crudo si ve ese status -- o 200 para conexión
+	// directa sin CDN, donde no hay nada esperando un upgrade a WebSocket y
+	// un 200 llano es el camuflaje más discreto (mismo criterio que usan
+	// proxy.py/open.py de SSHPlus, que traen uno u otro según el modo).
+	DecoyStatus int
 }
 
 // ConnRegistry rastrea qué conexiones SSH activas corresponden a cada uuid,
@@ -259,7 +266,7 @@ func Run(opts Options) error {
 					acceptErrCh <- err
 					return
 				}
-				go handleConn(rawConn, config, usage, conns, opts.UdpgwAddr)
+				go handleConn(rawConn, config, usage, conns, opts.UdpgwAddr, opts.DecoyStatus)
 			}
 		}()
 
@@ -375,7 +382,7 @@ const decoyIdleGap = 80 * time.Millisecond
 // de reenviar la conexión. En ambos casos hablamos nosotros primero.
 const decoyPeekTimeout = 400 * time.Millisecond
 
-func handleConn(rawConn net.Conn, config *ssh.ServerConfig, usage *Usage, conns *ConnRegistry, udpgwAddr string) {
+func handleConn(rawConn net.Conn, config *ssh.ServerConfig, usage *Usage, conns *ConnRegistry, udpgwAddr string, decoyStatus int) {
 	defer rawConn.Close()
 
 	br := bufio.NewReader(rawConn)
@@ -392,18 +399,26 @@ func handleConn(rawConn net.Conn, config *ssh.ServerConfig, usage *Usage, conns 
 			log.Println("señuelo: error leyendo headers:", derr)
 			return
 		}
-		// SIEMPRE 101, tenga o no el señuelo un Sec-WebSocket-Key real. Un
-		// CDN como Cloudflare solo pasa a modo túnel crudo (reenvía lo que
-		// sigue tal cual, sin re-interpretarlo como otra petición HTTP) si
-		// ve status 101 en la respuesta del origen -- da igual si el
-		// señuelo trae un upgrade de WebSocket genuino o solo el texto de
-		// adorno (como en payloads reales tipo HTTP Injector, que nunca
-		// completan un handshake WS de verdad). Con 200 el CDN da la
-		// petición por terminada y no entrega nada más.
+		// 101 (default) para nodos detrás de un CDN tipo Cloudflare, que solo
+		// pasa a modo túnel crudo (reenvía lo que sigue tal cual, sin
+		// re-interpretarlo como otra petición HTTP) si ve status 101 en la
+		// respuesta del origen -- da igual si el señuelo trae un upgrade de
+		// WebSocket genuino o solo el texto de adorno (como en payloads
+		// reales tipo HTTP Injector, que nunca completan un handshake WS de
+		// verdad). Con 200 el CDN da la petición por terminada y no entrega
+		// nada más.
+		//
+		// 200 para conexión directa sin CDN de por medio (Options.DecoyStatus
+		// == 200): ahí no hay nada esperando un upgrade a WebSocket, así que
+		// ni se simula uno -- iguala lo que hace open.py de SSHPlus en su
+		// modo directo, un 200 llano y punto.
 		var resp string
-		if wsKey != "" {
+		switch {
+		case decoyStatus == 200:
+			resp = "HTTP/1.1 200 OK\r\n\r\n"
+		case wsKey != "":
 			resp = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + wsAcceptFor(wsKey) + "\r\n\r\n"
-		} else {
+		default:
 			resp = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
 		}
 		if _, err := rawConn.Write([]byte(resp)); err != nil {
