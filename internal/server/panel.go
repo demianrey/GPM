@@ -59,9 +59,10 @@ type PanelUserStore struct {
 	http     *http.Client
 	nodeType string
 
-	mu     sync.RWMutex
-	users  map[string]panelUserEntry // uuid -> entry
-	pulled bool                      // false hasta el primer pullOnce exitoso
+	mu         sync.RWMutex
+	users      map[string]panelUserEntry // uuid -> entry
+	pulled     bool                      // false hasta el primer pullOnce exitoso
+	emptyPulls int                       // pulls consecutivos con 0 usuarios sin aplicar todavía
 }
 
 // NewPanelUserStore hace una sincronización inicial BLOQUEANTE (para que el
@@ -165,6 +166,28 @@ func (s *PanelUserStore) pullOnce(ctx context.Context) error {
 	}
 
 	s.mu.Lock()
+	// Una respuesta VÁLIDA (200) con 0 usuarios es indistinguible, a este
+	// nivel, de "se le cambió el grupo al nodo por error" o "el grupo
+	// quedó vacío" -- no necesariamente significa que de verdad ya nadie
+	// tiene acceso. Actuar sobre esto de inmediato (reemplazar la lista y
+	// cortar a TODOS los conectados) es una acción de radio muy amplio
+	// sobre una señal ambigua. Se exige confirmación en un segundo pull
+	// consecutivo antes de aplicarlo -- si el pull siguiente ya no viene
+	// vacío, se descarta como ruido/transitorio, sin haber tocado a nadie.
+	if len(users) == 0 && len(s.users) > 0 {
+		s.emptyPulls++
+		if s.emptyPulls < 2 {
+			previousCount := len(s.users)
+			attempt := s.emptyPulls
+			s.mu.Unlock()
+			log.Printf("panel: ADVERTENCIA -- el pull devolvió 0 usuarios (antes había %d). Puede ser un grupo vacío/mal configurado en el panel o una revocación real -- esperando confirmación en el próximo pull antes de tocar a nadie (%d/2)", previousCount, attempt)
+			return nil
+		}
+		log.Println("panel: 0 usuarios confirmado en 2 pulls consecutivos -- aplicando (puede cortar TODAS las conexiones activas del nodo)")
+	} else {
+		s.emptyPulls = 0
+	}
+
 	previous := s.users
 	s.users = users
 	firstPull := !s.pulled
