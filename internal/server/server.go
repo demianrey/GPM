@@ -128,6 +128,28 @@ func (r *ConnRegistry) Kick(uuid string) int {
 	return len(conns)
 }
 
+// KickAll cierra TODAS las conexiones activas, de cualquier uuid, y
+// devuelve cuántas cerró. Usado cuando el puerto cambia (ver Run): mismo
+// comportamiento que v2node/VLESS -- un cambio de puerto es una ruptura
+// esperada, todo cliente conectado se cae y reconecta con su config
+// actualizada, en vez de dejar sesiones viejas colgando indefinidamente en
+// un puerto que el admin ya no considera el oficial.
+func (r *ConnRegistry) KickAll() int {
+	r.mu.Lock()
+	var all []*ssh.ServerConn
+	for _, m := range r.conns {
+		for conn := range m {
+			all = append(all, conn)
+		}
+	}
+	r.conns = map[string]map[*ssh.ServerConn]struct{}{}
+	r.mu.Unlock()
+	for _, conn := range all {
+		_ = conn.Close()
+	}
+	return len(all)
+}
+
 // Usage acumula bytes de subida/bajada por uuid desde la última vez que se
 // drenó con Snapshot. Exportado para que el modo panel (panel.go) pueda
 // compartir la misma instancia entre las conexiones activas (que llaman
@@ -251,6 +273,9 @@ func Run(opts Options) error {
 				stopWatch()
 			}
 			_ = listener.Close()
+			if n := conns.KickAll(); n > 0 {
+				log.Println("GPM: cambio de puerto -- cortando", n, "conexión(es) activa(s)")
+			}
 			log.Println("GPM: el panel cambió el puerto a", newPort, "-- reiniciando el listener")
 			port = newPort
 			continue
