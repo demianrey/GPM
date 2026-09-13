@@ -1,12 +1,13 @@
-// Comando gpm: arranca el servidor GPM (modo manual) o administra el
-// archivo de usuarios. El modo "panel" (conectado a v2board) es roadmap,
-// ver README.md.
+// Comando gpm: arranca el servidor GPM, en modo manual (archivo de
+// usuarios local) o modo panel (sincronizado contra v2board, ver README).
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/demianrey/GPM/internal/server"
 )
@@ -38,11 +39,15 @@ func main() {
 func usage() {
 	fmt.Fprint(os.Stderr, `gpm -- Go Payload Multiplexer
 
-Uso:
+Uso (modo manual, archivo de usuarios local):
   gpm serve -addr :80 -users users.json [-hostkey host_key.pem]
   gpm adduser -users users.json <uuid> <nombre>
   gpm deluser -users users.json <uuid>
   gpm listusers -users users.json
+
+Uso (modo panel, sincronizado contra v2board -- ver README):
+  gpm serve -addr :80 -panel-url https://tu-panel.com \
+      -panel-node-id 1 -panel-token TU_API_KEY [-hostkey host_key.pem]
 
 Ver README.md para el formato del payload/señuelo y cómo apuntar un perfil
 SSH de la app a un servidor GPM.
@@ -52,22 +57,57 @@ SSH de la app a un servidor GPM.
 func cmdServe(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	addr := fs.String("addr", ":2222", "dirección:puerto donde escuchar, ej. :80 o 0.0.0.0:8022")
-	usersPath := fs.String("users", "users.json", "archivo JSON de usuarios permitidos (uuid -> nombre)")
 	hostKeyPath := fs.String("hostkey", "", "archivo donde persistir la host key RSA (vacío = efímera, nueva en cada arranque)")
+
+	// Modo manual.
+	usersPath := fs.String("users", "", "modo manual: archivo JSON de usuarios permitidos (uuid -> nombre)")
+
+	// Modo panel (v2board, ver README "Roadmap: modo panel").
+	panelURL := fs.String("panel-url", "", "modo panel: URL base del panel v2board (ej. https://tu-panel.com)")
+	panelNodeID := fs.Int("panel-node-id", 0, "modo panel: id del nodo en el panel")
+	panelToken := fs.String("panel-token", "", "modo panel: API key del nodo")
+	panelPull := fs.Duration("panel-pull-interval", 60*time.Second, "modo panel: cada cuánto sincronizar la lista de usuarios")
+	panelPush := fs.Duration("panel-push-interval", 60*time.Second, "modo panel: cada cuánto reportar consumo")
 	fs.Parse(args)
 
-	store, err := server.NewFileUserStore(*usersPath)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(1)
+	usingPanel := *panelURL != ""
+	usingManual := *usersPath != ""
+	if usingPanel == usingManual {
+		fmt.Fprintln(os.Stderr, "error: usa exactamente uno de -users (modo manual) o -panel-url (modo panel)")
+		os.Exit(2)
 	}
 
-	err = server.Run(server.Options{
+	opts := server.Options{
 		Addr:        *addr,
 		HostKeyPath: *hostKeyPath,
-		Users:       store,
-	})
-	if err != nil {
+	}
+
+	var err error
+	if usingManual {
+		opts.Users, err = server.NewFileUserStore(*usersPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+	} else {
+		ctx := context.Background()
+		panelStore, perr := server.NewPanelUserStore(ctx, server.PanelConfig{
+			APIHost:      *panelURL,
+			NodeID:       *panelNodeID,
+			Token:        *panelToken,
+			PullInterval: *panelPull,
+			PushInterval: *panelPush,
+		})
+		if perr != nil {
+			fmt.Fprintln(os.Stderr, "error:", perr)
+			os.Exit(1)
+		}
+		opts.Users = panelStore
+		opts.Usage = server.NewUsage()
+		go panelStore.RunUsageReporter(ctx, opts.Usage)
+	}
+
+	if err := server.Run(opts); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}

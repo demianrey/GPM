@@ -129,29 +129,55 @@ dominio propio (también proxied por el mismo CDN, origin = este servidor):
 HEAD / HTTP/1.1[crlf]Host: <dominio-carnada-en-el-cdn>[crlf][crlf][split]GET / HTTP/1.1[crlf]Host: <tu-dominio-propio-en-el-mismo-cdn>[crlf]Connection: Upgrade[crlf]Upgrade: websocket[crlf][crlf]
 ```
 
-## Roadmap: modo panel (conectado a v2board)
+## Modo panel (conectado a v2board)
 
-El objetivo a mediano plazo es que GPM pueda correr como backend de un panel
+GPM puede correr como backend de un panel
 [v2board](https://github.com/v2board/v2board), igual que hace
-[v2node](https://github.com/wyx2685/v2node) para VLESS: sincronizar la lista
-de usuarios/UUIDs contra la API del panel en vez de un archivo local, y
-reportar el consumo (`userUsage`) de vuelta.
+[v2node](https://github.com/wyx2685/v2node) para VLESS: sincroniza la lista
+de usuarios/UUIDs contra la API del panel (en vez de `users.json`) y reporta
+el consumo de vuelta. El contrato de API (endpoints, query params, formato
+del body) está tomado directo del cliente real de v2node — son los mismos
+endpoints "UniProxy" de v2board para cualquier protocolo, GPM los reutiliza
+tal cual.
 
-La arquitectura ya está pensada para esto: `server.Run` recibe cualquier
-implementación de `server.UserStore` (interfaz de una sola función,
-`Lookup(uuid) (name string, ok bool)`). El modo manual de hoy
-(`FileUserStore`, ver `internal/server/users.go`) es una implementación; el
-modo panel será otra (`PanelUserStore`, pendiente) que:
+```
+gpm serve -addr :80 -panel-url https://tu-panel.com \
+    -panel-node-id 1 -panel-token TU_API_KEY \
+    [-panel-pull-interval 60s] [-panel-push-interval 60s] \
+    [-hostkey host_key.pem]
+```
 
-- Sincroniza periódicamente la lista de usuarios/UUIDs del nodo desde la API
-  del panel.
-- Reporta uplink/downlink por usuario de vuelta al panel (mismo rol que
-  cumple `userUsage` hoy, que por ahora solo loguea).
-- Probablemente también reciba de ahí el puerto/configuración del nodo, en
-  vez de pasarse por flags (`gpm serve -panel-url ... -panel-token ...`
-  todavía no existe).
+**v2board no soporta "ssh" como tipo de protocolo** (`/api/v2/server/config`
+solo acepta `vmess|vless|trojan|shadowsocks|hysteria2|tuic|anytls`) — así
+que el nodo GPM hay que darlo de alta en el panel como uno de esos tipos
+(recomendado: **trojan**, el esquema más simple) únicamente para obtener un
+`node_id`/`token` válidos. GPM ignora por completo la config de
+protocolo/TLS que devolvería ese endpoint (de hecho ni lo llama todavía,
+ver abajo) — su wire protocol real (SSH + señuelo) es independiente de esa
+etiqueta.
 
-No implementado todavía — es el siguiente paso de este proyecto.
+Lo que SÍ usa, y es genérico sin importar el protocolo del nodo:
+- `GET /api/v1/server/UniProxy/user` — sincroniza `uuid -> id` cada
+  `-panel-pull-interval` (default 60s). Sincronización inicial bloqueante
+  al arrancar (si falla, el servidor no arranca).
+- `POST /api/v1/server/UniProxy/push` — reporta subida/bajada acumulada por
+  usuario cada `-panel-push-interval` (default 60s), como delta desde el
+  último reporte (no acumulado histórico).
+
+Arquitectura: `server.Run` recibe cualquier implementación de
+`server.UserStore` (interfaz de una sola función,
+`Lookup(uuid) (name string, ok bool)`) — `FileUserStore` (modo manual) y
+`PanelUserStore` (este modo, `internal/server/panel.go`) son intercambiables
+sin que el resto del servidor sepa de dónde salen los usuarios.
+
+**Pendiente / no probado contra un panel real todavía:**
+- `GET /api/v2/server/config` (para leer puerto/TLS del nodo desde el panel
+  en vez de `-addr`) — no implementado, se sigue configurando por flag.
+- Reporte de usuarios online (`UniProxy/alive`/`alivelist`) — no
+  implementado, v2board lo usa para el límite de dispositivos simultáneos.
+- Validar en la práctica que `node_type=v2node` (hardcodeado, ver
+  `PanelConfig.NodeTypeOverride` para cambiarlo) no rompe nada al no ser
+  realmente v2node quien llama.
 
 ## Seguridad
 

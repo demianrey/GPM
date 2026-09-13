@@ -40,26 +40,55 @@ type Options struct {
 	// en cada arranque -- solo para pruebas, cambia el fingerprint cada vez).
 	HostKeyPath string
 	// Users resuelve qué UUIDs pueden autenticarse. Ver users.go
-	// (FileUserStore) para la implementación de modo manual; el modo panel
-	// (roadmap, ver README) implementará la misma interfaz.
+	// (FileUserStore, modo manual) y panel.go (PanelUserStore, modo panel).
 	Users UserStore
+	// Usage acumula subida/bajada por uuid. Si es nil, Run crea uno interno
+	// (suficiente para el modo manual, que hoy solo lo usa para loguear).
+	// El modo panel necesita pasar el suyo aquí para poder drenarlo
+	// (Snapshot) y reportarlo al panel -- ver panel.go RunUsageReporter.
+	Usage *Usage
 }
 
-type userUsage struct {
+// Usage acumula bytes de subida/bajada por uuid desde la última vez que se
+// drenó con Snapshot. Exportado para que el modo panel (panel.go) pueda
+// compartir la misma instancia entre las conexiones activas (que llaman
+// Add) y el reportador periódico (que llama Snapshot).
+type Usage struct {
 	mu   sync.Mutex
 	up   map[string]int64
 	down map[string]int64
 }
 
-func newUserUsage() *userUsage {
-	return &userUsage{up: map[string]int64{}, down: map[string]int64{}}
+func NewUsage() *Usage {
+	return &Usage{up: map[string]int64{}, down: map[string]int64{}}
 }
 
-func (u *userUsage) add(uuid string, up, down int64) {
+func (u *Usage) Add(uuid string, up, down int64) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	u.up[uuid] += up
 	u.down[uuid] += down
+}
+
+// UsageDelta es cuánto subió/bajó un uuid desde el último Snapshot.
+type UsageDelta struct {
+	Up   int64
+	Down int64
+}
+
+// Snapshot devuelve los deltas acumulados y los resetea a cero -- para que
+// cada reporte al panel mande solo lo NUEVO desde el reporte anterior, no
+// el acumulado histórico completo.
+func (u *Usage) Snapshot() map[string]UsageDelta {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	out := make(map[string]UsageDelta, len(u.up))
+	for uuid, up := range u.up {
+		out[uuid] = UsageDelta{Up: up, Down: u.down[uuid]}
+	}
+	u.up = map[string]int64{}
+	u.down = map[string]int64{}
+	return out
 }
 
 // Run arranca GPM y bloquea sirviendo conexiones hasta que listener.Accept
@@ -74,7 +103,10 @@ func Run(opts Options) error {
 		return fmt.Errorf("host key: %w", err)
 	}
 
-	usage := newUserUsage()
+	usage := opts.Usage
+	if usage == nil {
+		usage = NewUsage()
+	}
 
 	config := &ssh.ServerConfig{
 		// Auth "none" real de SSH (RFC 4252): el cliente no manda password
@@ -151,7 +183,7 @@ const decoyIdleGap = 80 * time.Millisecond
 // de reenviar la conexión. En ambos casos hablamos nosotros primero.
 const decoyPeekTimeout = 400 * time.Millisecond
 
-func handleConn(rawConn net.Conn, config *ssh.ServerConfig, usage *userUsage) {
+func handleConn(rawConn net.Conn, config *ssh.ServerConfig, usage *Usage) {
 	defer rawConn.Close()
 
 	br := bufio.NewReader(rawConn)
@@ -284,7 +316,7 @@ func wsAcceptFor(key string) string {
 	return base64.StdEncoding.EncodeToString(h[:])
 }
 
-func relay(uuid, name string, channel ssh.Channel, target net.Conn, usage *userUsage) {
+func relay(uuid, name string, channel ssh.Channel, target net.Conn, usage *Usage) {
 	defer channel.Close()
 	defer target.Close()
 
@@ -304,7 +336,7 @@ func relay(uuid, name string, channel ssh.Channel, target net.Conn, usage *userU
 	}()
 	wg.Wait()
 
-	usage.add(uuid, up, down)
+	usage.Add(uuid, up, down)
 	log.Printf("[%s] canal cerrado, subida=%dB bajada=%dB", name, up, down)
 }
 
