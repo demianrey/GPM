@@ -141,11 +141,23 @@ consumo de vuelta, usando los mismos endpoints "UniProxy" que usa v2node
 para cualquier otro protocolo.
 
 ```
+echo "TU_COMMUNICATION_KEY" > /etc/gpm-panel-token && chmod 600 /etc/gpm-panel-token
+
 gpm serve -addr :80 -panel-url https://tu-panel.com \
-    -panel-node-id 1 -panel-token TU_API_KEY \
+    -panel-node-id 1 -panel-token-file /etc/gpm-panel-token \
     [-panel-pull-interval 60s] [-panel-push-interval 60s] \
     [-hostkey host_key.pem]
 ```
+
+**Usa `-panel-token-file`, no `-panel-token`.** El Communication Key de
+v2board NO es una credencial acotada a este nodo — es el secreto MAESTRO
+compartido por TODOS los nodos del panel (`UniProxyController` lo valida
+contra `config('v2board.server_token')`, un único valor global). Con él se
+puede leer el uuid de cualquier usuario de cualquier grupo y postear
+consumo falso contra cualquier nodo. Pasarlo por `-panel-token` lo deja
+visible en texto plano vía `ps aux`/`/proc/PID/cmdline` para cualquiera con
+acceso a la máquina. `-panel-token-file` (archivo 0600) o la variable de
+entorno `GPM_PANEL_TOKEN` evitan eso.
 
 El nodo se crea desde el admin del panel (Nodos → GPM), con sus propios
 campos `bug_host`/`payload`/`split_pos` (y `sni`, reservado para una futura

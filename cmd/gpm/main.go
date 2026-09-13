@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/demianrey/GPM/internal/server"
@@ -65,7 +66,8 @@ func cmdServe(args []string) {
 	// Modo panel (v2board, ver README "Roadmap: modo panel").
 	panelURL := fs.String("panel-url", "", "modo panel: URL base del panel v2board (ej. https://tu-panel.com)")
 	panelNodeID := fs.Int("panel-node-id", 0, "modo panel: id del nodo en el panel")
-	panelToken := fs.String("panel-token", "", "modo panel: API key del nodo")
+	panelToken := fs.String("panel-token", "", "modo panel: Communication Key del panel -- EVITAR, queda visible en texto plano vía 'ps aux'/argv para cualquiera con acceso a la máquina (es el secreto MAESTRO del panel entero, no algo acotado a este nodo). Preferir -panel-token-file.")
+	panelTokenFile := fs.String("panel-token-file", "", "modo panel: archivo con el Communication Key (recomendado, permisos 0600, sin salto de línea al final o se recorta solo)")
 	panelPull := fs.Duration("panel-pull-interval", 60*time.Second, "modo panel: cada cuánto sincronizar la lista de usuarios")
 	panelPush := fs.Duration("panel-push-interval", 60*time.Second, "modo panel: cada cuánto reportar consumo")
 	fs.Parse(args)
@@ -90,11 +92,30 @@ func cmdServe(args []string) {
 			os.Exit(1)
 		}
 	} else {
+		token := *panelToken
+		if *panelTokenFile != "" {
+			data, rerr := os.ReadFile(*panelTokenFile)
+			if rerr != nil {
+				fmt.Fprintln(os.Stderr, "error leyendo -panel-token-file:", rerr)
+				os.Exit(1)
+			}
+			token = strings.TrimSpace(string(data))
+		} else if token == "" {
+			// Última opción antes de fallar: variable de entorno, tampoco
+			// queda en argv (aunque sí en /proc/PID/environ para el mismo
+			// usuario o root -- sigue siendo mejor que un flag en claro).
+			token = os.Getenv("GPM_PANEL_TOKEN")
+		}
+		if token == "" {
+			fmt.Fprintln(os.Stderr, "error: falta el Communication Key -- usa -panel-token-file (recomendado), -panel-token, o la variable de entorno GPM_PANEL_TOKEN")
+			os.Exit(2)
+		}
+
 		ctx := context.Background()
 		panelStore, perr := server.NewPanelUserStore(ctx, server.PanelConfig{
 			APIHost:      *panelURL,
 			NodeID:       *panelNodeID,
-			Token:        *panelToken,
+			Token:        token,
 			PullInterval: *panelPull,
 			PushInterval: *panelPush,
 		})
