@@ -68,6 +68,12 @@ type Options struct {
 	PortProvider func(ctx context.Context) (int, error)
 	// PortCheckInterval: cada cuánto consultar PortProvider. Default 60s.
 	PortCheckInterval time.Duration
+	// OnPortChange, si no es nil, se llama con la nueva dirección completa
+	// (ej. ":81") justo después de un cambio de puerto exitoso -- pensado
+	// para persistir el puerto nuevo en el archivo de config de quien
+	// llama, así un reinicio del proceso arranca directo en el puerto
+	// correcto en vez de depender del primer chequeo al panel.
+	OnPortChange func(addr string)
 	// Conns rastrea las conexiones SSH activas por uuid, para poder
 	// cortarlas en caliente cuando un usuario deja de estar autorizado
 	// (cuota agotada, vigencia vencida) -- ver ConnRegistry.Kick, usado por
@@ -278,6 +284,9 @@ func Run(opts Options) error {
 			}
 			log.Println("GPM: el panel cambió el puerto a", newPort, "-- reiniciando el listener")
 			port = newPort
+			if opts.OnPortChange != nil {
+				opts.OnPortChange(net.JoinHostPort(host, port))
+			}
 			continue
 		case err := <-acceptErrCh:
 			if stopWatch != nil {

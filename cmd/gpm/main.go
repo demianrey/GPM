@@ -57,6 +57,7 @@ SSH de la app a un servidor GPM.
 
 func cmdServe(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	configPath := fs.String("config", "", "archivo JSON de configuración (recomendado en producción, ver README) -- si se da, es la ÚNICA fuente de verdad, se ignoran los demás flags")
 	addr := fs.String("addr", ":2222", "dirección:puerto donde escuchar, ej. :80 o 0.0.0.0:8022")
 	hostKeyPath := fs.String("hostkey", "", "archivo donde persistir la host key RSA (vacío = efímera, nueva en cada arranque)")
 	udpgwAddr := fs.String("udpgw-addr", "127.0.0.1:7300", "dirección virtual para soporte UDP embebido (protocolo udpgw) -- debe coincidir con el udpgwAddress del perfil cliente. Vacío = deshabilitado")
@@ -75,10 +76,15 @@ func cmdServe(args []string) {
 	panelPortCheck := fs.Duration("panel-port-check-interval", 60*time.Second, "modo panel: cada cuánto consultar el puerto del nodo en el panel")
 	fs.Parse(args)
 
+	if *configPath != "" {
+		serveFromConfig(*configPath)
+		return
+	}
+
 	usingPanel := *panelURL != ""
 	usingManual := *usersPath != ""
 	if usingPanel == usingManual {
-		fmt.Fprintln(os.Stderr, "error: usa exactamente uno de -users (modo manual) o -panel-url (modo panel)")
+		fmt.Fprintln(os.Stderr, "error: usa exactamente uno de -users (modo manual) o -panel-url (modo panel), o -config")
 		os.Exit(2)
 	}
 
@@ -144,6 +150,98 @@ func cmdServe(args []string) {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
+}
+
+func serveFromConfig(path string) {
+	cfg, err := loadFileConfig(path)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+
+	usingManual := cfg.UsersPath != ""
+	usingPanel := cfg.Panel != nil
+	if usingManual == usingPanel {
+		fmt.Fprintf(os.Stderr, "error: %s debe traer exactamente uno de \"users\" o \"panel\"\n", path)
+		os.Exit(2)
+	}
+
+	opts := server.Options{
+		Addr:        cfg.Addr,
+		HostKeyPath: cfg.HostKeyPath,
+		UdpgwAddr:   cfg.UdpgwAddr,
+	}
+
+	if usingManual {
+		var err error
+		opts.Users, err = server.NewFileUserStore(cfg.UsersPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+	} else {
+		p := cfg.Panel
+		if p.TokenFile == "" {
+			fmt.Fprintf(os.Stderr, "error: %s: panel.tokenFile es requerido\n", path)
+			os.Exit(2)
+		}
+		data, rerr := os.ReadFile(p.TokenFile)
+		if rerr != nil {
+			fmt.Fprintln(os.Stderr, "error leyendo panel.tokenFile:", rerr)
+			os.Exit(1)
+		}
+		token := strings.TrimSpace(string(data))
+
+		pull := parseDurationOr(p.PullInterval, 60*time.Second)
+		push := parseDurationOr(p.PushInterval, 60*time.Second)
+		portCheck := parseDurationOr(p.PortCheckInterval, 60*time.Second)
+		portSync := p.PortSync == nil || *p.PortSync
+
+		opts.Conns = server.NewConnRegistry()
+
+		ctx := context.Background()
+		panelStore, perr := server.NewPanelUserStore(ctx, server.PanelConfig{
+			APIHost:      p.URL,
+			NodeID:       p.NodeID,
+			Token:        token,
+			PullInterval: pull,
+			PushInterval: push,
+			Conns:        opts.Conns,
+		})
+		if perr != nil {
+			fmt.Fprintln(os.Stderr, "error:", perr)
+			os.Exit(1)
+		}
+		opts.Users = panelStore
+		opts.Usage = server.NewUsage()
+		go panelStore.RunUsageReporter(ctx, opts.Usage)
+
+		if portSync {
+			opts.PortProvider = panelStore.FetchNodePort
+			opts.PortCheckInterval = portCheck
+			opts.OnPortChange = func(newAddr string) {
+				if perr := persistAddr(path, newAddr); perr != nil {
+					fmt.Fprintln(os.Stderr, "aviso: no se pudo guardar el puerto nuevo en", path, ":", perr)
+				}
+			}
+		}
+	}
+
+	if err := server.Run(opts); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+}
+
+func parseDurationOr(s string, fallback time.Duration) time.Duration {
+	if s == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return fallback
+	}
+	return d
 }
 
 func cmdAddUser(args []string) {

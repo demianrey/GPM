@@ -80,21 +80,59 @@ logs/etc, sin tener que acordarse de flags ni de `journalctl` a mano.
 bash <(curl -Ls https://raw.githubusercontent.com/demianrey/GPM/main/script/install.sh)
 ```
 
-Pide interactivamente: puerto, modo (panel o manual), y si es panel la
-URL/node-id/Communication Key (el token se guarda en
-`/usr/local/gpm/panel-token`, 0600, nunca en el comando). Después de
-instalado:
+Pide interactivamente: id del nodo (el mismo `node_id` que tiene en el
+panel), puerto, modo (panel o manual), y si es panel la URL/Communication
+Key. Varios nodos pueden convivir en el mismo VPS: cada `install.sh`
+adicional da de alta uno nuevo sin tocar los que ya corren, todos comparten
+el mismo binario `/usr/local/bin/gpm`.
+
+Cada nodo vive en `/etc/gpm/<node_id>/`:
 
 ```
-gpm-cli            # menú interactivo
-gpm-cli restart     # o directo por subcomando: start/stop/restart/status/log/enable/disable/config/update/uninstall
+/etc/gpm/1/config.json     # config legible, formato ver abajo
+/etc/gpm/1/host_key.pem    # host key persistida
+/etc/gpm/1/panel-token     # Communication Key, 0600, nunca en el comando
 ```
 
-`gpm-cli config` abre `/usr/local/gpm/gpm.conf` (los flags de `gpm serve`,
-como variable de entorno `GPM_ARGS`) y reinicia el servicio al guardar.
-`gpm-cli log` sigue `journalctl -u gpm -f` en vivo. El servicio ya viene
-con `-panel-port-sync` activo (ver más abajo) -- si cambias el puerto desde
-el panel, GPM se reinicia solo, sin que haga falta tocar nada aquí.
+...y corre como su propia instancia systemd `gpm@1.service` (plantilla
+`/etc/systemd/system/gpm@.service`, instalada una sola vez).
+
+```
+gpm-cli                 # menú interactivo (pide el nodo si hay varios)
+gpm-cli 1                # menú directo del nodo 1
+gpm-cli restart 1         # o por subcomando: start/stop/restart/status/log/enable/disable/config/token/uninstall [node_id]
+gpm-cli list              # estado de todos los nodos instalados
+gpm-cli add                # da de alta otro nodo (re-corre install.sh)
+```
+
+`gpm-cli config <id>` abre `/etc/gpm/<id>/config.json` con `nano` (o
+`$EDITOR` si está seteado) y reinicia ese nodo al guardar. `gpm-cli token
+<id>` muestra y permite cambiar el Communication Key de ese nodo sin editar
+archivos a mano. `gpm-cli log <id>` sigue `journalctl -u gpm@<id> -f` en
+vivo. El campo `"portSync"` (default `true`, ver formato abajo) ya viene
+activo -- si cambias el puerto desde el panel, GPM reinicia su propio
+listener solo y actualiza `"addr"` en el `config.json` para que sobreviva
+un reinicio del proceso, sin que haga falta tocar nada aquí.
+
+`config.json` de un nodo en modo panel se ve así:
+
+```json
+{
+  "addr": ":80",
+  "hostkey": "/etc/gpm/1/host_key.pem",
+  "panel": {
+    "url": "https://tu-panel.com",
+    "nodeId": 1,
+    "tokenFile": "/etc/gpm/1/panel-token",
+    "pullInterval": "60s",
+    "pushInterval": "60s",
+    "portCheckInterval": "60s"
+  }
+}
+```
+
+Es la única fuente de verdad para `gpm serve -config /etc/gpm/1/config.json`
+-- si se pasa `-config`, los demás flags de `gpm serve` se ignoran.
 
 ## Uso — modo manual
 
@@ -167,16 +205,26 @@ usuarios/UUIDs contra la API del panel (en vez de `users.json`) y reporta el
 consumo de vuelta, usando los mismos endpoints "UniProxy" que usa v2node
 para cualquier otro protocolo.
 
+Vía `install.sh`/`gpm-cli` (recomendado, ver arriba) ya queda todo armado en
+`/etc/gpm/<node_id>/`. A mano, equivale a:
+
 ```
-echo "TU_COMMUNICATION_KEY" > /etc/gpm-panel-token && chmod 600 /etc/gpm-panel-token
+echo "TU_COMMUNICATION_KEY" > /etc/gpm/1/panel-token && chmod 600 /etc/gpm/1/panel-token
 
 gpm serve -addr :80 -panel-url https://tu-panel.com \
-    -panel-node-id 1 -panel-token-file /etc/gpm-panel-token \
+    -panel-node-id 1 -panel-token-file /etc/gpm/1/panel-token \
     [-panel-pull-interval 60s] [-panel-push-interval 60s] \
     [-hostkey host_key.pem]
 ```
 
-**Usa `-panel-token-file`, no `-panel-token`.** El Communication Key de
+...o, con el formato `-config` (lo que arma `gpm-cli` en realidad):
+
+```
+gpm serve -config /etc/gpm/1/config.json
+```
+
+**Usa `-panel-token-file` (o `panel.tokenFile` en `-config`), no
+`-panel-token`.** El Communication Key de
 v2board NO es una credencial acotada a este nodo — es el secreto MAESTRO
 compartido por TODOS los nodos del panel (`UniProxyController` lo valida
 contra `config('v2board.server_token')`, un único valor global). Con él se
