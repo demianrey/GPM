@@ -47,6 +47,14 @@ type Options struct {
 	// El modo panel necesita pasar el suyo aquí para poder drenarlo
 	// (Snapshot) y reportarlo al panel -- ver panel.go RunUsageReporter.
 	Usage *Usage
+	// UdpgwAddr es la dirección "virtual" (host:puerto) que, al pedirse
+	// como destino de un canal direct-tcpip, GPM atiende él mismo con el
+	// protocolo udpgw embebido (ver udpgw.go) en vez de intentar conectarse
+	// de verdad a esa dirección. Debe coincidir con el udpgwAddress
+	// configurado en el perfil del cliente. Vacío = deshabilitado (un
+	// cliente pidiendo UDP recibiría un intento de conexión real fallido a
+	// esa dirección, como cualquier otro destino inexistente).
+	UdpgwAddr string
 }
 
 // Usage acumula bytes de subida/bajada por uuid desde la última vez que se
@@ -137,7 +145,7 @@ func Run(opts Options) error {
 		if err != nil {
 			return fmt.Errorf("accept: %w", err)
 		}
-		go handleConn(rawConn, config, usage)
+		go handleConn(rawConn, config, usage, opts.UdpgwAddr)
 	}
 }
 
@@ -183,7 +191,7 @@ const decoyIdleGap = 80 * time.Millisecond
 // de reenviar la conexión. En ambos casos hablamos nosotros primero.
 const decoyPeekTimeout = 400 * time.Millisecond
 
-func handleConn(rawConn net.Conn, config *ssh.ServerConfig, usage *Usage) {
+func handleConn(rawConn net.Conn, config *ssh.ServerConfig, usage *Usage, udpgwAddr string) {
 	defer rawConn.Close()
 
 	br := bufio.NewReader(rawConn)
@@ -255,6 +263,21 @@ func handleConn(rawConn net.Conn, config *ssh.ServerConfig, usage *Usage) {
 		}
 
 		target := net.JoinHostPort(payload.DestAddr, fmt.Sprint(payload.DestPort))
+
+		if udpgwAddr != "" && target == udpgwAddr {
+			// El cliente pide "conectarse" a la dirección virtual de udpgw
+			// -- GPM atiende el protocolo él mismo, no hay nada real que
+			// discar aquí. Ver udpgw.go.
+			channel, requests, err := newChannel.Accept()
+			if err != nil {
+				continue
+			}
+			go ssh.DiscardRequests(requests)
+			log.Printf("[%s] canal udpgw embebido abierto", name)
+			go handleUdpgwChannel(channel, uuid, name, usage)
+			continue
+		}
+
 		targetConn, err := net.Dial("tcp", target)
 		if err != nil {
 			log.Printf("[%s] no se pudo conectar a %s: %v", name, target, err)

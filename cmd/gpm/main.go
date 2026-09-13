@@ -59,6 +59,7 @@ func cmdServe(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	addr := fs.String("addr", ":2222", "dirección:puerto donde escuchar, ej. :80 o 0.0.0.0:8022")
 	hostKeyPath := fs.String("hostkey", "", "archivo donde persistir la host key RSA (vacío = efímera, nueva en cada arranque)")
+	udpgwAddr := fs.String("udpgw-addr", "127.0.0.1:7300", "dirección virtual para soporte UDP embebido (protocolo udpgw) -- debe coincidir con el udpgwAddress del perfil cliente. Vacío = deshabilitado")
 
 	// Modo manual.
 	usersPath := fs.String("users", "", "modo manual: archivo JSON de usuarios permitidos (uuid -> nombre)")
@@ -82,6 +83,7 @@ func cmdServe(args []string) {
 	opts := server.Options{
 		Addr:        *addr,
 		HostKeyPath: *hostKeyPath,
+		UdpgwAddr:   *udpgwAddr,
 	}
 
 	var err error
