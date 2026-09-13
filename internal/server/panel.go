@@ -12,36 +12,28 @@ import (
 	"time"
 )
 
-// PanelConfig configura la conexión con el panel v2board. El contrato
-// (endpoints, query params, formato del body) está tomado directo del
-// cliente real de v2node (api/v2board/*.go en github.com/wyx2685/v2node) --
-// v2board expone los mismos endpoints "UniProxy" sin importar el protocolo
-// del nodo, así que GPM los reutiliza tal cual aunque su protocolo real
-// (SSH + señuelo) no sea uno de los que el panel reconoce nativamente.
+// PanelConfig configura la conexión con un panel v2board CON el módulo GPM
+// instalado (tabla/modelo/controlador propios "server/gpm/*", ver README) --
+// no es v2board stock. El contrato de los endpoints "UniProxy" (user/push)
+// es el mismo que usa v2node para cualquier otro protocolo.
 //
-// node_type: v2board no parece validar este valor contra nada del lado del
-// nodo -- es solo el nombre del agente que llama. Se manda "v2node" a
-// propósito (no "gpm") para máxima compatibilidad con paneles que sí lo
-// validen contra una lista conocida; si en el futuro se confirma que da
-// igual, cambiar es trivial (NodeTypeOverride).
+// node_type: el módulo GPM del panel reconoce "gpm" (case-insensitive) y
+// mantiene sus propias CacheKey de estado (online/last-check/last-push)
+// separadas de v2node real -- no reusar node_type=v2node contra un nodo GPM,
+// las estadísticas del admin quedarían mezcladas con nodos que no son este.
 type PanelConfig struct {
 	// APIHost es la URL base del panel, ej. "https://panel.tudominio.com".
 	APIHost string
-	// NodeID es el id numérico del nodo en el panel (Server Management).
-	// Como v2board no soporta "ssh" como protocolo, este nodo debe darse de
-	// alta como algún tipo soportado (trojan recomendado, ver README) --
-	// GPM solo usa este id para las llamadas de usuarios/reporte, ignora
-	// por completo la config de protocolo/TLS que devolvería
-	// /api/v2/server/config.
+	// NodeID es el id numérico del nodo GPM en el panel (Nodos > GPM).
 	NodeID int
-	// Token es la API key del nodo (columna "ApiKey"/"Key" en v2board).
+	// Token es la API key del nodo.
 	Token string
 	// PullInterval: cada cuánto sincronizar la lista de usuarios. Default 60s.
 	PullInterval time.Duration
 	// PushInterval: cada cuánto reportar consumo acumulado. Default 60s.
 	PushInterval time.Duration
-	// NodeTypeOverride reemplaza el "v2node" default del query param
-	// node_type, por si algún panel lo valida distinto.
+	// NodeTypeOverride reemplaza el "GPM" default del query param node_type,
+	// por si hace falta apuntar a un panel con otra convención.
 	NodeTypeOverride string
 
 	HTTPClient *http.Client
@@ -82,7 +74,7 @@ func NewPanelUserStore(ctx context.Context, cfg PanelConfig) (*PanelUserStore, e
 	}
 	nodeType := cfg.NodeTypeOverride
 	if nodeType == "" {
-		nodeType = "v2node"
+		nodeType = "GPM"
 	}
 
 	s := &PanelUserStore{

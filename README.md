@@ -129,16 +129,16 @@ dominio propio (también proxied por el mismo CDN, origin = este servidor):
 HEAD / HTTP/1.1[crlf]Host: <dominio-carnada-en-el-cdn>[crlf][crlf][split]GET / HTTP/1.1[crlf]Host: <tu-dominio-propio-en-el-mismo-cdn>[crlf]Connection: Upgrade[crlf]Upgrade: websocket[crlf][crlf]
 ```
 
-## Modo panel (conectado a v2board)
+## Modo panel (conectado a v2board + módulo GPM)
 
-GPM puede correr como backend de un panel
-[v2board](https://github.com/v2board/v2board), igual que hace
-[v2node](https://github.com/wyx2685/v2node) para VLESS: sincroniza la lista
-de usuarios/UUIDs contra la API del panel (en vez de `users.json`) y reporta
-el consumo de vuelta. El contrato de API (endpoints, query params, formato
-del body) está tomado directo del cliente real de v2node — son los mismos
-endpoints "UniProxy" de v2board para cualquier protocolo, GPM los reutiliza
-tal cual.
+GPM corre como backend de un panel [v2board](https://github.com/v2board/v2board)
+**con el módulo GPM instalado** (tabla/modelo/controlador/rutas propios
+`server/gpm/*`, "GPM" como su propio item en el menú de Nodos, junto a
+v2node/shadowsocks/vmess/trojan/hysteria/tuic/vless/anytls — NO es v2board
+stock, requiere ese módulo agregado al panel). Sincroniza la lista de
+usuarios/UUIDs contra la API del panel (en vez de `users.json`) y reporta el
+consumo de vuelta, usando los mismos endpoints "UniProxy" que usa v2node
+para cualquier otro protocolo.
 
 ```
 gpm serve -addr :80 -panel-url https://tu-panel.com \
@@ -147,16 +147,15 @@ gpm serve -addr :80 -panel-url https://tu-panel.com \
     [-hostkey host_key.pem]
 ```
 
-**v2board no soporta "ssh" como tipo de protocolo** (`/api/v2/server/config`
-solo acepta `vmess|vless|trojan|shadowsocks|hysteria2|tuic|anytls`) — así
-que el nodo GPM hay que darlo de alta en el panel como uno de esos tipos
-(recomendado: **trojan**, el esquema más simple) únicamente para obtener un
-`node_id`/`token` válidos. GPM ignora por completo la config de
-protocolo/TLS que devolvería ese endpoint (de hecho ni lo llama todavía,
-ver abajo) — su wire protocol real (SSH + señuelo) es independiente de esa
-etiqueta.
+El nodo se crea desde el admin del panel (Nodos → GPM), con sus propios
+campos `bug_host`/`payload`/`split_pos` (y `sni`, reservado para una futura
+capa TLS, todavía no implementada de este lado) — el admin genera el link
+`ssh://` de suscripción directo desde esos campos, coincide byte a byte con
+lo que `SSHFmt.kt` (app VpnMax) espera. `node_type` que manda GPM: `GPM`
+(configurable con `PanelConfig.NodeTypeOverride`), con CacheKey de
+online/stats propias en el panel, separadas de v2node real.
 
-Lo que SÍ usa, y es genérico sin importar el protocolo del nodo:
+Endpoints usados:
 - `GET /api/v1/server/UniProxy/user` — sincroniza `uuid -> id` cada
   `-panel-pull-interval` (default 60s). Sincronización inicial bloqueante
   al arrancar (si falla, el servidor no arranca).
@@ -170,14 +169,17 @@ Arquitectura: `server.Run` recibe cualquier implementación de
 `PanelUserStore` (este modo, `internal/server/panel.go`) son intercambiables
 sin que el resto del servidor sepa de dónde salen los usuarios.
 
-**Pendiente / no probado contra un panel real todavía:**
-- `GET /api/v2/server/config` (para leer puerto/TLS del nodo desde el panel
-  en vez de `-addr`) — no implementado, se sigue configurando por flag.
-- Reporte de usuarios online (`UniProxy/alive`/`alivelist`) — no
-  implementado, v2board lo usa para el límite de dispositivos simultáneos.
-- Validar en la práctica que `node_type=v2node` (hardcodeado, ver
-  `PanelConfig.NodeTypeOverride` para cambiarlo) no rompe nada al no ser
-  realmente v2node quien llama.
+**Pendiente:**
+- `GET /api/v2/server/config` (para leer puerto desde el panel en vez de
+  `-addr`) — el módulo del panel ya expone `server_port` en un `case 'gpm'`,
+  pero GPM todavía no lo llama.
+- Reporte de usuarios online (`UniProxy/alive`/`alivelist`) — implementado
+  del lado panel (CacheKey `SERVER_GPM_ONLINE_USER`), no implementado del
+  lado GPM todavía.
+- Prueba end-to-end contra un nodo real creado desde el admin (hay uno de
+  prueba, `show=0` hasta aprobarlo).
+- Soporte SNI/TLS real — el campo existe en el panel (reservado), sin
+  implementación de este lado.
 
 ## Seguridad
 
