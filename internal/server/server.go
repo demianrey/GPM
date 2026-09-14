@@ -409,13 +409,19 @@ func handleConn(rawConn net.Conn, config *ssh.ServerConfig, usage *Usage, conns 
 		// nada más.
 		//
 		// 200 para conexión directa sin CDN de por medio (Options.DecoyStatus
-		// == 200): ahí no hay nada esperando un upgrade a WebSocket, así que
-		// ni se simula uno -- iguala lo que hace open.py de SSHPlus en su
-		// modo directo, un 200 llano y punto.
+		// == 200): ahí no hay nada esperando un upgrade a WebSocket. Dos
+		// respuestas HTTP apiladas -- no una sola -- porque así responde un
+		// injector real de dos saltos (señuelo público + túnel CONNECT al
+		// backend SSH), confirmado comparando bytes contra un server
+		// AlberVPN real: "200 <marca>" (acepta el señuelo) seguido de
+		// "200 Connection Established" (el clásico de un proxy HTTP
+		// CONNECT). Un "200 OK" solo es más genérico y más fácil de
+		// distinguir para el clasificador de la operadora que el patrón que
+		// ya sabemos que funciona.
 		var resp string
 		switch {
 		case decoyStatus == 200:
-			resp = "HTTP/1.1 200 OK\r\n\r\n"
+			resp = "HTTP/1.1 200 @DemianRed\r\nContent-length: 0\r\n\r\nHTTP/1.1 200 Connection Established\r\n\r\n"
 		case wsKey != "":
 			resp = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + wsAcceptFor(wsKey) + "\r\n\r\n"
 		default:
