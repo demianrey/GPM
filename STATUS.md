@@ -215,10 +215,13 @@ decidió igual por `tls=1` porque (a) es el principio que bajó Demian --
 GPM con vocabulario propio, no heredado de Xray, y (b) da un solo nombre
 `tls` en columna + endpoint + URI. Impacto: iOS necesita un ajuste chico
 (disparar sobre `tls=1` en vez de `security=tls`, sigue reusando
-`parseSecurity` internamente). **Android** (`SSHFmt.kt`/`SSHBean.java`) hoy
-NO tiene nada de tls/sni -- es trabajo pendiente completo ahí (parsear los
-params + no saltar el streamSettings en la rama ssh de `ConfigBuilder.kt`,
-que ya es genérico para otros protocolos).
+`parseSecurity` internamente). **Android** (`SSHFmt.kt`/`SSHBean.java`) --
+HECHO y verificado (compila limpio en los dos worktrees, VpnMax-kotlin y
+VpnMax-dev): mismo trigger `tls=1`, `SSHBean` con campos `tls`/`sni`
+nuevos (Kryo v4), `ConfigBuilder.kt` arma `streamSettings.security=tls` +
+`tlsSettings` (allowInsecure siempre `true`, no leído del link) cuando
+`bean.tls`, y saltea el señuelo en ese caso -- misma exclusión mutua que
+iOS, sin lógica nueva del lado señuelo (`payload` queda vacío).
 
 Params PROPIOS sobre la `ssh://`:
 
@@ -296,11 +299,14 @@ rama propia de GPM, no el payload de v2node.)
     `security:tls, serverName:www.microsoft.com, allowInsecure:true,
     payload:""` (vacío, exclusión con señuelo OK).
   - **Android** (`SSHFmt.kt` / `SSHBean.java`, Kotlin, código distinto al
-    de iOS): PENDIENTE completo -- hoy no lee nada de tls/sni. Falta
-    parsear los params y no saltar el streamSettings en la rama ssh de
-    `ConfigBuilder.kt` (ya genérico para otros protocolos). Cuidado con el
-    decoder Swift/bean: campos nuevos opcionales o siempre presentes, o
-    rompe la decodificación de TODO el array de outbounds.
+    de iOS): HECHO. `SSHBean` (Kryo v4, campos `tls`/`sni` nuevos, default
+    `false`/`""`), `parseSSH`/`toUri` en `SSHFmt.kt` (mismo trigger
+    `tls=1`, `allowInsecure` no viaja en el link), `ConfigBuilder.kt` arma
+    `streamSettings` cuando `bean.tls` y saltea el señuelo en ese caso.
+    Compila limpio en VpnMax-kotlin y VpnMax-dev. Nota: acá NO aplicó el
+    bug del decoder Swift que rompió iOS (`streamSettings`/settings NO
+    opcionales) -- Kotlin/Kryo no tiene ese problema, los campos nuevos
+    con default alcanzan.
 
 ### Exclusión mutua señuelo vs TLS (precedencia)
 
@@ -350,17 +356,18 @@ que en el resto de los protocolos del panel).
 2. GPM server -- HECHO y verificado (`openssl s_client -servername` da
    cert con SAN = SNI; banner SSH dentro del TLS; sin regresión en modo
    señuelo).
-3. Cliente core: iOS parser HECHO y verificado (`tls=1`, streamSettings
-   directo); Android pendiente completo. Host-key check: RESPONDIDO
-   (acepta cualquiera; ver Seguridad). Falta la prueba end-to-end con
-   tráfico real (TLS real + banner SSH adentro) contra un `gpm -tls`.
+3. Cliente core: **iOS y Android HECHOS** (`tls=1`, streamSettings
+   directo en los dos). Host-key check: RESPONDIDO (acepta cualquiera; ver
+   Seguridad). Falta la prueba end-to-end con tráfico real (TLS real +
+   banner SSH adentro) contra un `gpm -tls`.
 4. Panel -- HECHO y desplegado (commit `bc672b17`): columna `tls`, form
    con selector de modo + validación de exclusividad, `tls` en
    `/api/v2/server/config`, `tls=1&sni=` en `buildGpmUri()`.
 
 Release del server: **v0.1.5** (binarios linux amd64/arm64 en el release
-de GitHub). Falta SOLO: (a) Android (`SSHFmt.kt`), (b) la prueba
-end-to-end con tráfico real contra un `gpm -tls` desplegado.
+de GitHub). Contrato completo en las cuatro partes (server, panel, iOS,
+Android). Falta SOLO la prueba end-to-end con tráfico real contra un
+`gpm -tls` desplegado.
 
 ## Pendiente / conocido
 
@@ -371,10 +378,10 @@ end-to-end con tráfico real contra un `gpm -tls` desplegado.
   separado ("GPM-test", su propio `node_id`); falta corregir el
   `config.json` de ese servidor para que use el ID correcto en vez del de
   producción.
-- **Campo `sni` / capa TLS (stunnel embebido)**: contrato acordado entre
-  las tres sesiones (ver sección "stunnel embebido (TLS + SNI)" arriba),
-  todavía SIN implementar en ningún lado. El campo `sni` del panel se
-  reusa para esto.
+- **Capa TLS (stunnel embebido)**: implementada en las cuatro partes
+  (GPM server, panel, iOS, Android -- ver sección "stunnel embebido (TLS
+  + SNI)" arriba). Falta SOLO la prueba end-to-end con tráfico real
+  contra un `gpm -tls` desplegado con host/uuid reales.
 - **`UniProxy/alive`/`alivelist`** (reporte de usuarios online) --
   implementado del lado panel (`CacheKey SERVER_GPM_ONLINE_USER`), no
   implementado del lado GPM todavía.
