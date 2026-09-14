@@ -4,3 +4,4 @@ users.json
 host_key.pem
 *.pem
 dist/
+LOCAL_NOTES.md
