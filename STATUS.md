@@ -271,11 +271,18 @@ rama propia de GPM, no el payload de v2node.)
   del outbound ya levanta TLS solo si el streamSettings trae TLS). El
   trabajo está en el PARSER del link → streamSettings, y difiere por
   plataforma:
-  - **iOS** (`libXray-build/share/parse_share.go`, Go): parser HECHO
-    (commit local `73ac6d6`, sin pushear -- fork read-only de
-    `XTLS/libXray`). Reusa `parseSecurity` (mismo de vless/trojan), respeta
-    exclusión con el señuelo. Ajuste pendiente: disparar sobre `tls=1`
-    (GPM-native) en vez de `security=tls`.
+  - **iOS** (`libXray-build/share/parse_share.go`, Go): parser HECHO y
+    verificado con link real (commits locales `73ac6d6` → `0aadb0a`, sin
+    pushear -- fork read-only de `XTLS/libXray`). Dispara sobre `tls=1` y
+    arma el `streamSettings` DIRECTO (`security: "tls"`, `serverName` del
+    param `sni`, `allowInsecure: true` constante, no leído del link). Nota:
+    la primera versión reusaba `parseSecurity` (el helper de vless/trojan)
+    pero ese decide adjuntar TLSSettings mirando su propio param `security`
+    de Xray -- como GPM manda `tls=1`, nunca pegaba nada y el `sni` se
+    descartaba (`serverName` vacío). Por eso NO se reusa `parseSecurity`
+    acá. Verificado: `ssh://...?tls=1&sni=www.microsoft.com` →
+    `security:tls, serverName:www.microsoft.com, allowInsecure:true,
+    payload:""` (vacío, exclusión con señuelo OK).
   - **Android** (`SSHFmt.kt` / `SSHBean.java`, Kotlin, código distinto al
     de iOS): PENDIENTE completo -- hoy no lee nada de tls/sni. Falta
     parsear los params y no saltar el streamSettings en la rama ssh de
@@ -331,9 +338,10 @@ que en el resto de los protocolos del panel).
 2. GPM server -- HECHO y verificado (`openssl s_client -servername` da
    cert con SAN = SNI; banner SSH dentro del TLS; sin regresión en modo
    señuelo).
-3. Cliente core: iOS parser HECHO (falta ajuste `tls=1`); Android
-   pendiente completo. Host-key check: RESPONDIDO (acepta cualquiera; ver
-   Seguridad).
+3. Cliente core: iOS parser HECHO y verificado (`tls=1`, streamSettings
+   directo); Android pendiente completo. Host-key check: RESPONDIDO
+   (acepta cualquiera; ver Seguridad). Falta la prueba end-to-end con
+   tráfico real (TLS real + banner SSH adentro) contra un `gpm -tls`.
 4. Panel (capa más fina): booleano `tls` (columna + form + validación de
    exclusividad + exponerlo en `/api/v2/server/config`) -- todo eso NO
    depende de los nombres de params, se puede adelantar. Solo `buildGpmUri()`
