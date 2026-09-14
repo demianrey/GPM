@@ -257,7 +257,19 @@ rama propia de GPM, no el payload de v2node.)
   que `behind_cdn` -- un cambio NO reinicia el listener. Verificado
   end-to-end: TLS 1.3, cert con SAN = SNI pedido, banner SSH fluyendo
   dentro del TLS; modo sin-TLS sin regresión.
-- **Panel (`v2board_mod`):** (1) agregar un **booleano propio** `tls` en
+- **Panel (`v2board_mod`) -- HECHO y desplegado (commit `bc672b17`):**
+  `/api/v2/server/config?node_id=<id>&node_type=GPM` ya devuelve `tls`
+  (booleano JSON estricto, columna int + cast `(bool)` a la salida, mismo
+  patrón que `behind_cdn`); `buildGpmUri()` emite `tls=1&sni=` en modo TLS.
+  La columna nace apagada (nada cambió para lo que ya corre; verificado que
+  el link de GPM-test sale idéntico a antes). El `sni` SOLO se emite en
+  modo TLS (fuera de TLS no significa nada) -- OK para las dos puntas: GPM
+  no parsea el link (lee `tls` del endpoint), y el parser iOS solo mira
+  `sni` cuando `tls=1`. Exclusividad señuelo/TLS: el admin la RECHAZA al
+  guardar (no vacía campos en silencio, para no borrar una plantilla de
+  señuelo afinada); el form muestra selector de modo y esconde lo que no
+  aplica (incluido `behind_cdn`). Lo que sigue del contrato original:
+  (1) agregar un **booleano propio** `tls` en
   la tabla del nodo GPM -- NO derivar el modo de "sni no vacío" (así el
   admin puede apagar TLS sin perder el SNI escrito, y se permite TLS sin
   SNI). El `sni` ya existe. (2) Exponer `tls` en
@@ -342,11 +354,13 @@ que en el resto de los protocolos del panel).
    directo); Android pendiente completo. Host-key check: RESPONDIDO
    (acepta cualquiera; ver Seguridad). Falta la prueba end-to-end con
    tráfico real (TLS real + banner SSH adentro) contra un `gpm -tls`.
-4. Panel (capa más fina): booleano `tls` (columna + form + validación de
-   exclusividad + exponerlo en `/api/v2/server/config`) -- todo eso NO
-   depende de los nombres de params, se puede adelantar. Solo `buildGpmUri()`
-   (emitir `tls=1&sni=`) depende de la lista cerrada, que ya quedó definida
-   arriba.
+4. Panel -- HECHO y desplegado (commit `bc672b17`): columna `tls`, form
+   con selector de modo + validación de exclusividad, `tls` en
+   `/api/v2/server/config`, `tls=1&sni=` en `buildGpmUri()`.
+
+Release del server: **v0.1.5** (binarios linux amd64/arm64 en el release
+de GitHub). Falta SOLO: (a) Android (`SSHFmt.kt`), (b) la prueba
+end-to-end con tráfico real contra un `gpm -tls` desplegado.
 
 ## Pendiente / conocido
 
