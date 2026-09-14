@@ -186,32 +186,64 @@ cachea en memoria. Mejor camuflaje que un cert fijo: si un DPI compara el
 SNI del ClientHello contra el `SAN` del certificado, coinciden. Costo
 operativo cero (no hay que conseguir cert para cada dominio-carnada).
 
-### Contrato del link de suscripción (URI ssh://, NO streamSettings)
+### Contrato del link de suscripción (URI ssh://, params PROPIOS de GPM)
 
-CORRECCIÓN respecto a la primera versión de este contrato: los nodos GPM
-NO se emiten como JSON de Xray con `streamSettings`. El panel los emite
-como una **URI `ssh://`** (via `Helper::buildGpmUri()`, dentro de la
-clase `General`, que produce la lista base64 que consume VpnMax). NO hay
-ningún objeto `streamSettings`/`tlsSettings` en ese camino -- eso es la
-estructura de los generadores Clash/Singbox de vless/vmess, no de esta
-URI. O sea: el TLS viaja como **query params sobre la `ssh://`**, y quien
-los parsea y los mapea al `streamSettings` interno del outbound es
-`SSHFmt.kt` del lado cliente (ahí sí se reusa la capa TLS del core).
+Dos correcciones importantes respecto a la primera versión de este
+contrato (ambas de la sesión del panel / Demian):
 
-Params propuestos sobre la `ssh://` (PENDIENTE de confirmar que
-`SSHFmt.kt` los parsea con estos nombres exactos -- coordinándolo con la
-sesión del cliente):
+1. Los nodos GPM NO se emiten como JSON de Xray con `streamSettings`. El
+   panel los emite como una **URI `ssh://`** (via `Helper::buildGpmUri()`,
+   dentro de la clase `General`, que produce la lista base64 que consume
+   VpnMax). No hay ningún objeto `streamSettings`/`tlsSettings` en ese
+   camino -- eso es la estructura de los generadores Clash/Singbox de
+   vless/vmess.
+2. **GPM es su propio protocolo, no una variante de Xray/v2node** -- tabla
+   (`v2_server_gpm`), modelo, controlador y rama propia en
+   `/api/v2/server/config`, con SUS campos, no los ~25 de Xray. Por eso el
+   contrato NO usa el vocabulario de Xray (`security`, `tlsSettings.*`):
+   define **params propios de GPM**, en el mismo estilo camelCase que los
+   seis que ya existen (`bugHost`, `payload`, `splitPos`, `udpgwAddress`,
+   `keepaliveInterval`, `sni`). Que el core del cliente, para
+   implementarlo, mapee esos params a su capa TLS interna de Xray es un
+   detalle del cliente, no del contrato.
 
-- `security=tls`  → activa la capa TLS (ausente / distinto = sin TLS,
-  comportamiento actual con señuelo).
+DECISIÓN DE NOMBRES (resuelta): se usa `tls=1` GPM-native, NO `security=tls`
+de Xray. Contexto: la sesión del core ya había implementado el parser de
+**iOS** (`parse_share.go`, commit local `73ac6d6`) leyendo `security`/
+`allowInsecure` (reusando `parseSecurity`, el parser de vless/trojan). Se
+decidió igual por `tls=1` porque (a) es el principio que bajó Demian --
+GPM con vocabulario propio, no heredado de Xray, y (b) da un solo nombre
+`tls` en columna + endpoint + URI. Impacto: iOS necesita un ajuste chico
+(disparar sobre `tls=1` en vez de `security=tls`, sigue reusando
+`parseSecurity` internamente). **Android** (`SSHFmt.kt`/`SSHBean.java`) hoy
+NO tiene nada de tls/sni -- es trabajo pendiente completo ahí (parsear los
+params + no saltar el streamSettings en la rama ssh de `ConfigBuilder.kt`,
+que ya es genérico para otros protocolos).
+
+Params PROPIOS sobre la `ssh://`:
+
+- `tls=1`  → activa la capa TLS (ausente / `0` = sin TLS, comportamiento
+  actual con señuelo). Booleano propio, MISMO nombre `tls` en los tres
+  lugares (columna `v2_server_gpm.tls`, campo del endpoint
+  `/api/v2/server/config`, y este param de la URI). NO se deduce de "sni
+  no vacío".
 - `sni=<dominio-carnada>`  → el ServerName del ClientHello (lo que ve el
   DPI). **Ya existe** en `buildGpmUri()` (columna `sni`, varchar(255)
   nullable), se emite omitido cuando está vacío.
-- `allowInsecure=1`  → el cliente no valida la cadena (GPM usa cert
-  self-signed). Siempre 1 en nodos TLS por ahora.
+
+`allowInsecure` NO se modela como param: es constante (GPM siempre usa
+cert self-signed, así que el cliente SIEMPRE debe conectar sin validar
+cadena). Cuando `tls=1`, el cliente asume "no valido cadena", y listo --
+no hace falta columna ni param. (Si algún día se soportan certs reales de
+una CA pública / Let's Encrypt, se agrega el param ahí; es aditivo. Por
+ahora NO está en el roadmap: la decisión tomada es self-signed + inseguro.)
 
 Ejemplo:
-`ssh://<uuid>@<host>:<port>?security=tls&sni=www.microsoft.com&allowInsecure=1#<nombre>`
+`ssh://<uuid>@<host>:<port>?tls=1&sni=www.microsoft.com#<nombre>`
+
+(Nota: esto es SOLO el link panel→cliente. GPM server no parsea esta URI;
+lee el modo TLS del booleano `tls` de `/api/v2/server/config`, que es una
+rama propia de GPM, no el payload de v2node.)
 
 ### Responsabilidades por componente
 
@@ -235,15 +267,21 @@ Ejemplo:
   `buildGpmUri()` (ver "Contrato del link" arriba). (4) Validar al guardar
   que TLS y señuelo sean excluyentes (ver abajo). UI: `behind_cdn` no
   aplica en modo TLS, ocultarlo del form en ese caso.
-- **Cliente core (Android exclave-core / iOS Xray-core):** confirmado que
-  NO hay que tocar `proxy/ssh/client.go`. Lo que sí toca: `SSHFmt.kt`
-  tiene que parsear los params `security`/`sni`/`allowInsecure` de la URI
-  y mapearlos al `streamSettings` del outbound (`security=tls`,
-  `tlsSettings.serverName`, `tlsSettings.allowInsecure`), que es de donde
-  el `internet.Dial` genérico levanta el TLS. Cuidado con el decoder Swift
-  (ver sección iOS): cualquier campo nuevo del bean/JSON tiene que ser
-  opcional o venir siempre presente, o rompe la decodificación de TODO el
-  array de outbounds.
+- **Cliente core:** `proxy/ssh/client.go` NO se toca (el `internet.Dial`
+  del outbound ya levanta TLS solo si el streamSettings trae TLS). El
+  trabajo está en el PARSER del link → streamSettings, y difiere por
+  plataforma:
+  - **iOS** (`libXray-build/share/parse_share.go`, Go): parser HECHO
+    (commit local `73ac6d6`, sin pushear -- fork read-only de
+    `XTLS/libXray`). Reusa `parseSecurity` (mismo de vless/trojan), respeta
+    exclusión con el señuelo. Ajuste pendiente: disparar sobre `tls=1`
+    (GPM-native) en vez de `security=tls`.
+  - **Android** (`SSHFmt.kt` / `SSHBean.java`, Kotlin, código distinto al
+    de iOS): PENDIENTE completo -- hoy no lee nada de tls/sni. Falta
+    parsear los params y no saltar el streamSettings en la rama ssh de
+    `ConfigBuilder.kt` (ya genérico para otros protocolos). Cuidado con el
+    decoder Swift/bean: campos nuevos opcionales o siempre presentes, o
+    rompe la decodificación de TODO el array de outbounds.
 
 ### Exclusión mutua señuelo vs TLS (precedencia)
 
@@ -266,14 +304,26 @@ servidor -- es solo para que el tráfico parezca HTTPS. El cifrado y la
 autenticación reales los da el SSH de adentro (el uuid como credencial).
 Que quede escrito para que nadie asuma que el TLS aporta garantías.
 
-**Pregunta de seguridad abierta (la levantó la sesión del panel, hay que
-resolverla antes de dar por cerrado el diseño):** ¿el cliente valida la
-host key del SSH, o usa algo tipo `InsecureIgnoreHostKey`? Si NO la valida
-y además el TLS no valida cadena, entonces no hay autenticación de
-servidor en NINGUNA de las dos capas, y un MITM podría suplantar el nodo,
-quedarse con el uuid del usuario y ver todo el tráfico. Dado que la auth
-SSH es `none` y el uuid ES la credencial, esto importa. A confirmar del
-lado core.
+**Pregunta de host key -- RESPONDIDA por la sesión del core (confirmado en
+`proxy/ssh/client.go`, igual en Android e iOS):** cuando el perfil no trae
+una `PublicKey` pineada (el caso normal -- el link de suscripción nunca la
+setea), el `hostKeyCallback` loguea el fingerprint y devuelve `nil`, o sea
+**acepta CUALQUIER host key** (TOFU solo de nombre: ni siquiera persiste ni
+compara contra la vista antes). Conclusión: hoy, con TLS+allowInsecure, NO
+hay autenticación de servidor en NINGUNA de las dos capas -- el uuid es el
+único secreto end-to-end. Es exactamente el MISMO modelo de amenaza que
+VLESS sin REALITY/cert pineado; NO es peor que GPM sin TLS (ya era así),
+solo que juntarlo con `allowInsecure` lo hace más visible. Un MITM en el
+path podría suplantar el nodo y quedarse con el uuid.
+
+Mitigación (existe en el código de las dos plataformas, NO cableada al
+flujo de suscripción todavía): `config.PublicKey` (pin de host key SSH) y
+`tlsSettings.PinnedPeerCertSha256` (param `pcs`, ya soportado por el
+`parseSecurity` que reusa iOS). Si el panel algún día ofrece un modo
+"server verificado", la data ya tiene dónde ir -- se agregan esos dos
+campos GPM-native al link cuando el admin los provea, sin código nuevo del
+lado parser. Por ahora fuera de roadmap (la credencial es el uuid, igual
+que en el resto de los protocolos del panel).
 
 ### Orden de trabajo acordado
 
@@ -281,11 +331,14 @@ lado core.
 2. GPM server -- HECHO y verificado (`openssl s_client -servername` da
    cert con SAN = SNI; banner SSH dentro del TLS; sin regresión en modo
    señuelo).
-3. Cliente core (long pole, ya puede probar contra un GPM real con
-   `-tls`). Pendiente: params en `SSHFmt.kt` + confirmar host-key check.
-4. Panel (capa más fina): booleano `tls`, exponerlo en
-   `/api/v2/server/config`, params en `buildGpmUri()`, validación de
-   exclusividad.
+3. Cliente core: iOS parser HECHO (falta ajuste `tls=1`); Android
+   pendiente completo. Host-key check: RESPONDIDO (acepta cualquiera; ver
+   Seguridad).
+4. Panel (capa más fina): booleano `tls` (columna + form + validación de
+   exclusividad + exponerlo en `/api/v2/server/config`) -- todo eso NO
+   depende de los nombres de params, se puede adelantar. Solo `buildGpmUri()`
+   (emitir `tls=1&sni=`) depende de la lista cerrada, que ya quedó definida
+   arriba.
 
 ## Pendiente / conocido
 
