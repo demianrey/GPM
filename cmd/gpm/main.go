@@ -62,6 +62,8 @@ func cmdServe(args []string) {
 	hostKeyPath := fs.String("hostkey", "", "archivo donde persistir la host key RSA (vacío = efímera, nueva en cada arranque)")
 	udpgwAddr := fs.String("udpgw-addr", "127.0.0.1:7300", "dirección virtual para soporte UDP embebido (protocolo udpgw) -- debe coincidir con el udpgwAddress del perfil cliente. Vacío = deshabilitado")
 	cdn := fs.Bool("cdn", true, "el nodo está detrás de un CDN tipo Cloudflare -- si true, el señuelo responde 101 (lo que el CDN necesita para pasar a modo túnel crudo); si false (conexión directa, sin CDN), responde 200")
+	tlsEnabled := fs.Bool("tls", false, "envolver cada conexión en TLS 1.3 con SNI (\"stunnel embebido\") -- cert self-signed por SNI al vuelo, el cliente conecta con allowInsecure; reemplaza al señuelo")
+	tlsCA := fs.String("tls-ca", "", "archivo PEM donde persistir la CA self-signed que firma los leaf por SNI (vacío = efímera, nueva en cada arranque)")
 
 	// Modo manual.
 	usersPath := fs.String("users", "", "modo manual: archivo JSON de usuarios permitidos (uuid -> nombre)")
@@ -74,6 +76,7 @@ func cmdServe(args []string) {
 	panelPull := fs.Duration("panel-pull-interval", 60*time.Second, "modo panel: cada cuánto sincronizar la lista de usuarios")
 	panelPush := fs.Duration("panel-push-interval", 60*time.Second, "modo panel: cada cuánto reportar consumo")
 	panelPortSync := fs.Bool("panel-port-sync", true, "modo panel: seguir el puerto configurado en el nodo del panel (/api/v2/server/config), reiniciando el listener solo si cambia -- igual que v2node")
+	panelTLSSync := fs.Bool("panel-tls-sync", true, "modo panel: sincronizar en caliente el modo TLS del nodo contra el campo \"tls\" de /api/v2/server/config")
 	panelPortCheck := fs.Duration("panel-port-check-interval", 60*time.Second, "modo panel: cada cuánto consultar el puerto del nodo en el panel")
 	fs.Parse(args)
 
@@ -99,6 +102,8 @@ func cmdServe(args []string) {
 		HostKeyPath: *hostKeyPath,
 		UdpgwAddr:   *udpgwAddr,
 		DecoyStatus: decoyStatus,
+		TLSEnabled:  *tlsEnabled,
+		TLSCAPath:   *tlsCA,
 	}
 
 	var err error
@@ -151,6 +156,10 @@ func cmdServe(args []string) {
 			opts.PortProvider = panelStore.FetchNodePort
 			opts.PortCheckInterval = *panelPortCheck
 		}
+		if *panelTLSSync {
+			opts.TLSProvider = panelStore.FetchNodeTls
+			opts.TLSCheckInterval = *panelPortCheck
+		}
 	}
 
 	if err := server.Run(opts); err != nil {
@@ -183,6 +192,8 @@ func serveFromConfig(path string) {
 		HostKeyPath: cfg.HostKeyPath,
 		UdpgwAddr:   cfg.UdpgwAddr,
 		DecoyStatus: decoyStatus,
+		TLSEnabled:  cfg.Tls != nil && *cfg.Tls,
+		TLSCAPath:   cfg.TlsCAPath,
 	}
 
 	if usingManual {
@@ -243,6 +254,12 @@ func serveFromConfig(path string) {
 		if cdnSync {
 			opts.DecoyStatusProvider = panelStore.FetchNodeCdn
 			opts.DecoyStatusCheckInterval = portCheck
+		}
+
+		tlsSync := p.TlsSync == nil || *p.TlsSync
+		if tlsSync {
+			opts.TLSProvider = panelStore.FetchNodeTls
+			opts.TLSCheckInterval = portCheck
 		}
 	}
 

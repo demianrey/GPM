@@ -118,11 +118,21 @@ sub-objetos que Swift espera, y sin `omitempty` en los campos de
 
 ## stunnel embebido (TLS + SNI): CONTRATO entre GPM, panel y cliente
 
-**Estado: PROPUESTA acordada, todavía NO implementada en ningún lado.**
-Esta sección es el contrato compartido para que las tres sesiones (esta =
-GPM/server, la del panel `v2board_mod`, y la del core del cliente
-Android/iOS) implementen lo mismo sin pisarse. Cualquier cambio a lo de
-acá hay que reflejarlo en las tres.
+**Estado: GPM (server) IMPLEMENTADO y verificado end-to-end. Panel y
+cliente: pendientes.** Esta sección es el contrato compartido para que
+las tres sesiones (esta = GPM/server, la del panel `v2board_mod`, y la
+del core del cliente Android/iOS) implementen lo mismo sin pisarse.
+Cualquier cambio a lo de acá hay que reflejarlo en las tres.
+
+Confirmado por la sesión del core: **el cliente NO necesita tocar
+`proxy/ssh/client.go` en ninguno de los dos cores.** El `internet.Dial`
+que ya usa el outbound SSH es TLS-aware genérico (mismo mecanismo que
+vless/vmess/trojan): si el `streamSettings` del outbound trae
+`security=tls`, envuelve la conexión en TLS antes de devolverla y el
+código SSH recibe un `net.Conn` ya descifrado. Y "modo TLS no manda
+señuelo" sale gratis: `applyDecoy` retorna sin escribir nada si el
+`payload` viene vacío, así que basta con que el panel deje `payload`
+vacío en los nodos TLS.
 
 ### Qué es y por qué
 
@@ -176,46 +186,106 @@ cachea en memoria. Mejor camuflaje que un cert fijo: si un DPI compara el
 SNI del ClientHello contra el `SAN` del certificado, coinciden. Costo
 operativo cero (no hay que conseguir cert para cada dominio-carnada).
 
-### Contrato del link de suscripción (reusar convención Xray)
+### Contrato del link de suscripción (URI ssh://, NO streamSettings)
 
-El core del cliente iOS es un fork de **Xray-core**, que YA entiende
-`streamSettings.security=tls` + `tlsSettings.serverName` +
-`tlsSettings.allowInsecure`. **NO inventar params nuevos** (`tls=1&sni=`):
-el panel emite el nodo SSH con esos `streamSettings` estándar, y el
-cliente reusa su capa TLS existente conectada al outbound SSH, en vez de
-escribir un parser nuevo. Concretamente el link/JSON del nodo lleva:
+CORRECCIÓN respecto a la primera versión de este contrato: los nodos GPM
+NO se emiten como JSON de Xray con `streamSettings`. El panel los emite
+como una **URI `ssh://`** (via `Helper::buildGpmUri()`, dentro de la
+clase `General`, que produce la lista base64 que consume VpnMax). NO hay
+ningún objeto `streamSettings`/`tlsSettings` en ese camino -- eso es la
+estructura de los generadores Clash/Singbox de vless/vmess, no de esta
+URI. O sea: el TLS viaja como **query params sobre la `ssh://`**, y quien
+los parsea y los mapea al `streamSettings` interno del outbound es
+`SSHFmt.kt` del lado cliente (ahí sí se reusa la capa TLS del core).
 
-- `security: "tls"` (vs sin TLS = comportamiento actual con señuelo)
-- `serverName: <dominio-SNI-carnada>` (lo que ve el DPI)
-- `allowInsecure: true`
+Params propuestos sobre la `ssh://` (PENDIENTE de confirmar que
+`SSHFmt.kt` los parsea con estos nombres exactos -- coordinándolo con la
+sesión del cliente):
+
+- `security=tls`  → activa la capa TLS (ausente / distinto = sin TLS,
+  comportamiento actual con señuelo).
+- `sni=<dominio-carnada>`  → el ServerName del ClientHello (lo que ve el
+  DPI). **Ya existe** en `buildGpmUri()` (columna `sni`, varchar(255)
+  nullable), se emite omitido cuando está vacío.
+- `allowInsecure=1`  → el cliente no valida la cadena (GPM usa cert
+  self-signed). Siempre 1 en nodos TLS por ahora.
+
+Ejemplo:
+`ssh://<uuid>@<host>:<port>?security=tls&sni=www.microsoft.com&allowInsecure=1#<nombre>`
 
 ### Responsabilidades por componente
 
-- **GPM (este repo):** envolver en `tls.Server()` en el accept loop de
-  `Run` cuando el nodo esté en modo TLS; `GetCertificate` self-signed por
-  SNI + CA persistida; nuevo campo en `config.json` (`"tls": true` o
-  bloque); sincronizar el flag desde el panel EN CALIENTE con el mismo
-  patrón atómico que `behind_cdn` (cambio no reinicia el listener). El
-  campo `sni` que ya existe reservado en el panel encaja acá.
-- **Panel (`v2board_mod`):** guardar el flag TLS + el SNI en la tabla del
-  nodo GPM; exponerlo en `GET /api/v2/server/config` (junto a
-  `server_port`/`behind_cdn`) para que GPM lo lea; emitir el nodo en la
-  suscripción con `streamSettings.security=tls` + `serverName` +
-  `allowInsecure` según lo de arriba.
-- **Cliente core (Android exclave-core / iOS Xray-core):** conectar la
-  capa TLS existente del stream al outbound SSH cuando `security=tls`;
-  `allowInsecure=true`; mandar el SNI en el ClientHello. Cuidado con el
-  decoder Swift (ver sección iOS): cualquier campo nuevo que se agregue
-  al JSON del nodo tiene que ser opcional o venir siempre presente, o
-  rompe la decodificación de TODO el array de outbounds.
+- **GPM (este repo) -- HECHO:** `internal/server/tls.go` (`tlsManager`:
+  CA self-signed persistida + `GetCertificate` que emite/cachea un leaf
+  por SNI al vuelo); wrap `tls.Server()` al inicio de `handleConn` (capa
+  más externa); `Options.TLSEnabled`/`TLSCAPath`/`TLSProvider`; flag
+  `"tls"` (+ `"tlsCa"`) en `config.json` y `"tlsSync"` en el bloque
+  `panel`; sincronización en caliente vía `PanelUserStore.FetchNodeTls`
+  (campo `tls` de `/api/v2/server/config`) con el mismo patrón atómico
+  que `behind_cdn` -- un cambio NO reinicia el listener. Verificado
+  end-to-end: TLS 1.3, cert con SAN = SNI pedido, banner SSH fluyendo
+  dentro del TLS; modo sin-TLS sin regresión.
+- **Panel (`v2board_mod`):** (1) agregar un **booleano propio** `tls` en
+  la tabla del nodo GPM -- NO derivar el modo de "sni no vacío" (así el
+  admin puede apagar TLS sin perder el SNI escrito, y se permite TLS sin
+  SNI). El `sni` ya existe. (2) Exponer `tls` en
+  `GET /api/v2/server/config` como booleano JSON estricto (`true`/`false`,
+  no `0`/`1`), mismo tratamiento que `behind_cdn` (columna int, cast
+  `(bool)` a la salida). (3) Emitir los params sobre la `ssh://` en
+  `buildGpmUri()` (ver "Contrato del link" arriba). (4) Validar al guardar
+  que TLS y señuelo sean excluyentes (ver abajo). UI: `behind_cdn` no
+  aplica en modo TLS, ocultarlo del form en ese caso.
+- **Cliente core (Android exclave-core / iOS Xray-core):** confirmado que
+  NO hay que tocar `proxy/ssh/client.go`. Lo que sí toca: `SSHFmt.kt`
+  tiene que parsear los params `security`/`sni`/`allowInsecure` de la URI
+  y mapearlos al `streamSettings` del outbound (`security=tls`,
+  `tlsSettings.serverName`, `tlsSettings.allowInsecure`), que es de donde
+  el `internet.Dial` genérico levanta el TLS. Cuidado con el decoder Swift
+  (ver sección iOS): cualquier campo nuevo del bean/JSON tiene que ser
+  opcional o venir siempre presente, o rompe la decodificación de TODO el
+  array de outbounds.
+
+### Exclusión mutua señuelo vs TLS (precedencia)
+
+TLS y señuelo son excluyentes por nodo. Cómo se resuelve el estado
+inválido "payload lleno + tls encendido":
+
+- **Panel:** valida al guardar que no se configuren los dos a la vez
+  (fuente de verdad de la config).
+- **GPM:** si el nodo está en modo TLS, hace el handshake TLS y adentro
+  corre la detección normal -- que ve el banner `SSH-` directo (el
+  cliente TLS no manda señuelo) y saltea el señuelo sola. No hay conflicto
+  en el server: la capa TLS es independiente del valor de `behind_cdn`.
+- **Cliente:** en modo TLS deja el `payload` vacío → `applyDecoy` no
+  escribe nada. Exclusión automática, sin lógica nueva.
+
+### Seguridad: esta capa TLS es CAMUFLAJE, no autenticación
+
+Con `allowInsecure=true` + cert self-signed, el TLS NO autentica al
+servidor -- es solo para que el tráfico parezca HTTPS. El cifrado y la
+autenticación reales los da el SSH de adentro (el uuid como credencial).
+Que quede escrito para que nadie asuma que el TLS aporta garantías.
+
+**Pregunta de seguridad abierta (la levantó la sesión del panel, hay que
+resolverla antes de dar por cerrado el diseño):** ¿el cliente valida la
+host key del SSH, o usa algo tipo `InsecureIgnoreHostKey`? Si NO la valida
+y además el TLS no valida cadena, entonces no hay autenticación de
+servidor en NINGUNA de las dos capas, y un MITM podría suplantar el nodo,
+quedarse con el uuid del usuario y ver todo el tráfico. Dado que la auth
+SSH es `none` y el uuid ES la credencial, esto importa. A confirmar del
+lado core.
 
 ### Orden de trabajo acordado
 
 1. Este contrato (hecho, en este archivo).
-2. GPM server (autónomo, no depende de nadie -- testeable con
-   `openssl s_client -servername` o un cliente Go mínimo).
-3. Cliente core (long pole, prueba contra el GPM del paso 2).
-4. Panel (capa más fina, depende del formato final del link).
+2. GPM server -- HECHO y verificado (`openssl s_client -servername` da
+   cert con SAN = SNI; banner SSH dentro del TLS; sin regresión en modo
+   señuelo).
+3. Cliente core (long pole, ya puede probar contra un GPM real con
+   `-tls`). Pendiente: params en `SSHFmt.kt` + confirmar host-key check.
+4. Panel (capa más fina): booleano `tls`, exponerlo en
+   `/api/v2/server/config`, params en `buildGpmUri()`, validación de
+   exclusividad.
 
 ## Pendiente / conocido
 

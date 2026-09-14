@@ -16,6 +16,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha1"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
@@ -102,6 +103,31 @@ type Options struct {
 	// DecoyStatusCheckInterval: cada cuánto consultar DecoyStatusProvider.
 	// Default 60s.
 	DecoyStatusCheckInterval time.Duration
+	// TLSEnabled activa la capa "stunnel embebido": cada conexión aceptada
+	// se envuelve en TLS 1.3 con SNI ANTES de la detección de señuelo/SSH
+	// (ver handleConn), de modo que en el cable el tráfico parece HTTPS real
+	// hacia el dominio del SNI. Reemplaza al señuelo HTTP-like (en modo TLS
+	// el cliente no manda señuelo: abre TLS y adentro va el banner SSH
+	// directo, que la detección de abajo reconoce sola). Cert self-signed
+	// por SNI generado al vuelo (ver tls.go); el cliente conecta con
+	// allowInsecure -- esta capa es camuflaje, no seguridad.
+	TLSEnabled bool
+	// TLSCAPath es el archivo PEM donde persistir la CA self-signed que
+	// firma los leaf por SNI. Vacío = CA efímera (nueva en cada arranque;
+	// da igual porque el cliente no valida la cadena). Análogo a
+	// HostKeyPath.
+	TLSCAPath string
+	// TLSProvider, si no es nil, se consulta cada TLSCheckInterval para
+	// saber si el nodo debe estar en modo TLS -- ej. leyendo el campo "tls"
+	// de /api/v2/server/config del panel (ver PanelUserStore.FetchNodeTls),
+	// mismo patrón atómico que DecoyStatusProvider. Un cambio acá NO reinicia
+	// el listener: aplica en la próxima conexión nueva. Nota: si se pasa un
+	// provider, la capa TLS se inicializa (se genera/lee la CA) aunque el
+	// valor inicial sea false, para poder encenderla en caliente sin
+	// reiniciar.
+	TLSProvider func(ctx context.Context) (bool, error)
+	// TLSCheckInterval: cada cuánto consultar TLSProvider. Default 60s.
+	TLSCheckInterval time.Duration
 }
 
 // ConnRegistry rastrea qué conexiones SSH activas corresponden a cada uuid,
@@ -273,14 +299,43 @@ func Run(opts Options) error {
 		initDecoy = 101
 	}
 	decoyStatus.Store(int32(initDecoy))
+
+	// runCtx vive lo que vive Run -- lo comparten los watchers de estado que
+	// se aplican EN CALIENTE sin reiniciar el listener (modo señuelo y modo
+	// TLS). El watcher de puerto NO usa este ctx: tiene su propio ciclo por
+	// listener (ver más abajo), porque un cambio de puerto SÍ reinicia.
+	runCtx, runCancel := context.WithCancel(context.Background())
+	defer runCancel()
+
 	if opts.DecoyStatusProvider != nil {
 		interval := opts.DecoyStatusCheckInterval
 		if interval <= 0 {
 			interval = 60 * time.Second
 		}
-		runCtx, runCancel := context.WithCancel(context.Background())
-		defer runCancel()
 		go watchDecoyStatus(runCtx, opts.DecoyStatusProvider, decoyStatus, interval)
+	}
+
+	// Capa TLS ("stunnel embebido"): si está activa, cada conexión aceptada
+	// se envuelve en TLS antes de la detección de señuelo/SSH (ver
+	// handleConn). tlsOn es atómico por el mismo motivo que decoyStatus: un
+	// cambio (sincronizado desde el panel vía TLSProvider) aplica en la
+	// próxima conexión nueva, sin reiniciar el listener ni cortar sesiones.
+	tlsOn := &atomic.Bool{}
+	tlsOn.Store(opts.TLSEnabled)
+	var tlsCfg *tls.Config
+	if opts.TLSEnabled || opts.TLSProvider != nil {
+		tm, terr := newTLSManager(opts.TLSCAPath)
+		if terr != nil {
+			return fmt.Errorf("tls: %w", terr)
+		}
+		tlsCfg = tm.serverConfig()
+		if opts.TLSProvider != nil {
+			interval := opts.TLSCheckInterval
+			if interval <= 0 {
+				interval = 60 * time.Second
+			}
+			go watchTLS(runCtx, opts.TLSProvider, tlsOn, interval)
+		}
 	}
 
 	for {
@@ -299,7 +354,7 @@ func Run(opts Options) error {
 					acceptErrCh <- err
 					return
 				}
-				go handleConn(rawConn, config, usage, conns, opts.UdpgwAddr, int(decoyStatus.Load()))
+				go handleConn(rawConn, config, usage, conns, opts.UdpgwAddr, int(decoyStatus.Load()), tlsOn.Load(), tlsCfg)
 			}
 		}()
 
@@ -365,6 +420,32 @@ func watchDecoyStatus(ctx context.Context, provider func(context.Context) (int, 
 			if int32(status) != current.Load() {
 				log.Println("GPM: el panel cambió el modo del señuelo a", status)
 				current.Store(int32(status))
+			}
+		}
+	}
+}
+
+// watchTLS sincroniza en caliente si el nodo termina TLS o no contra
+// provider (ver PanelUserStore.FetchNodeTls) -- igual que watchDecoyStatus,
+// nunca reinicia nada: solo actualiza el bool atómico que el accept loop lee
+// para decidir si envolver cada conexión nueva en TLS. Las sesiones ya
+// abiertas no se tocan; el cambio aplica desde la próxima conexión.
+func watchTLS(ctx context.Context, provider func(context.Context) (bool, error), current *atomic.Bool, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			on, err := provider(ctx)
+			if err != nil {
+				log.Println("GPM: error consultando modo TLS del panel:", err)
+				continue
+			}
+			if on != current.Load() {
+				log.Println("GPM: el panel cambió el modo TLS a", on)
+				current.Store(on)
 			}
 		}
 	}
@@ -443,19 +524,43 @@ const decoyIdleGap = 80 * time.Millisecond
 // de reenviar la conexión. En ambos casos hablamos nosotros primero.
 const decoyPeekTimeout = 400 * time.Millisecond
 
-func handleConn(rawConn net.Conn, config *ssh.ServerConfig, usage *Usage, conns *ConnRegistry, udpgwAddr string, decoyStatus int) {
+// tlsHandshakeTimeout acota el handshake TLS de entrada (modo "stunnel
+// embebido") para que un cliente que abre la conexión y no completa el
+// handshake no deje la goroutine colgada. Generoso a propósito -- un
+// handshake TLS puede necesitar un par de round-trips sobre un enlace lento.
+const tlsHandshakeTimeout = 10 * time.Second
+
+func handleConn(rawConn net.Conn, config *ssh.ServerConfig, usage *Usage, conns *ConnRegistry, udpgwAddr string, decoyStatus int, tlsOn bool, tlsCfg *tls.Config) {
 	defer rawConn.Close()
 
-	br := bufio.NewReader(rawConn)
+	// Capa TLS más externa ("stunnel embebido", ver Options.TLSEnabled): si
+	// el nodo está en modo TLS, el handshake se hace acá y todo lo de abajo
+	// (detección de señuelo, handshake SSH, udpgw, medición por uuid) corre
+	// sobre la conexión ya descifrada, sin enterarse. En modo TLS el cliente
+	// NO manda señuelo: abre TLS y adentro va el banner SSH directo, que la
+	// detección de más abajo reconoce sola (Peek ve "SSH-").
+	netConn := rawConn
+	if tlsOn && tlsCfg != nil {
+		tconn := tls.Server(rawConn, tlsCfg)
+		_ = tconn.SetReadDeadline(time.Now().Add(tlsHandshakeTimeout))
+		if err := tconn.Handshake(); err != nil {
+			log.Println("tls: handshake fallido:", err)
+			return
+		}
+		_ = tconn.SetReadDeadline(time.Time{})
+		netConn = tconn
+	}
 
-	_ = rawConn.SetReadDeadline(time.Now().Add(decoyPeekTimeout))
+	br := bufio.NewReader(netConn)
+
+	_ = netConn.SetReadDeadline(time.Now().Add(decoyPeekTimeout))
 	prefix, peekErr := br.Peek(4)
 
 	if peekErr == nil && !bytes.Equal(prefix, []byte("SSH-")) {
 		// Llegó algo rápido y no es un banner SSH -- se asume señuelo
 		// HTTP-like (mismo patrón que el injector de ws/xhttp del cliente
 		// en exclave-core: tokens [crlf]/[cr]/[lf]/[split]).
-		wsKey, derr := readDecoyUntilIdle(rawConn, br)
+		wsKey, derr := readDecoyUntilIdle(netConn, br)
 		if derr != nil {
 			log.Println("señuelo: error leyendo headers:", derr)
 			return
@@ -488,7 +593,7 @@ func handleConn(rawConn net.Conn, config *ssh.ServerConfig, usage *Usage, conns 
 		default:
 			resp = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
 		}
-		if _, err := rawConn.Write([]byte(resp)); err != nil {
+		if _, err := netConn.Write([]byte(resp)); err != nil {
 			log.Println("señuelo: error escribiendo respuesta:", err)
 			return
 		}
@@ -497,9 +602,9 @@ func handleConn(rawConn net.Conn, config *ssh.ServerConfig, usage *Usage, conns 
 	// entrada, no hacemos nada más aquí: seguimos directo al handshake
 	// real, y ssh.NewServerConn manda NUESTRO banner primero -- lo cual
 	// además es lo que rompe cualquier estancamiento con el otro lado.
-	_ = rawConn.SetReadDeadline(time.Time{})
+	_ = netConn.SetReadDeadline(time.Time{})
 
-	conn := &bufConn{Conn: rawConn, r: br}
+	conn := &bufConn{Conn: netConn, r: br}
 	sshConn, chans, reqs, err := ssh.NewServerConn(conn, config)
 	if err != nil {
 		log.Println("handshake fallido:", err)

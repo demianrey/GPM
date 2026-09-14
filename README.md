@@ -241,10 +241,10 @@ acceso a la máquina. `-panel-token-file` (archivo 0600) o la variable de
 entorno `GPM_PANEL_TOKEN` evitan eso.
 
 El nodo se crea desde el admin del panel (Nodos → GPM), con sus propios
-campos `bug_host`/`payload`/`split_pos` (y `sni`, reservado para una futura
-capa TLS, todavía no implementada de este lado) — el admin genera el link
-`ssh://` de suscripción directo desde esos campos, coincide byte a byte con
-lo que `SSHFmt.kt` (app VpnMax) espera. `node_type` que manda GPM: `GPM`
+campos `bug_host`/`payload`/`split_pos` (y `sni`, usado por el modo TLS —
+ver "Modo TLS" abajo) — el admin genera el link `ssh://` de suscripción
+directo desde esos campos, coincide byte a byte con lo que `SSHFmt.kt`
+(app VpnMax) espera. `node_type` que manda GPM: `GPM`
 (configurable con `PanelConfig.NodeTypeOverride`), con CacheKey de
 online/stats propias en el panel, separadas de v2node real.
 
@@ -256,10 +256,12 @@ Endpoints usados:
   usuario cada `-panel-push-interval` (default 60s), como delta desde el
   último reporte (no acumulado histórico).
 - `GET /api/v2/server/config` — se consulta cada `-panel-port-check-interval`
-  (default 60s) solo para leer `server_port`. Si cambia respecto al puerto
-  actual, GPM cierra el listener viejo y abre uno nuevo ahí mismo, sin
-  reiniciar el proceso -- igual que hace v2node, ver `-panel-port-sync`
-  (activo por default, desactivable).
+  (default 60s) para leer `server_port`, `behind_cdn` (modo señuelo 101/200)
+  y `tls` (modo TLS on/off). Si cambia el puerto, GPM cierra el listener
+  viejo y abre uno nuevo ahí mismo, sin reiniciar el proceso -- igual que
+  hace v2node, ver `-panel-port-sync` (activo por default, desactivable).
+  Los cambios de `behind_cdn`/`tls` se aplican en caliente sin reiniciar el
+  listener (ver `-panel-tls-sync`).
 
 Arquitectura: `server.Run` recibe cualquier implementación de
 `server.UserStore` (interfaz de una sola función,
@@ -273,8 +275,38 @@ sin que el resto del servidor sepa de dónde salen los usuarios.
   lado GPM todavía.
 - Prueba end-to-end contra un nodo real creado desde el admin (hay uno de
   prueba, `show=0` hasta aprobarlo).
-- Soporte SNI/TLS real — el campo existe en el panel (reservado), sin
-  implementación de este lado.
+- Modo TLS (stunnel embebido): implementado del lado GPM (ver abajo),
+  pendiente el wiring del panel (booleano `tls` + params en el link) y del
+  cliente (`SSHFmt.kt`). Estado y contrato completo en `STATUS.md`.
+
+## Modo TLS (stunnel embebido)
+
+Además del señuelo HTTP-like, GPM puede envolver cada conexión en **TLS
+1.3 con SNI** antes del handshake SSH, para que en el cable el tráfico
+parezca una navegación HTTPS real hacia el dominio del SNI (misma idea que
+un `stunnel` por delante de SSH, pero embebido en el binario). Reemplaza
+al señuelo: en modo TLS el cliente abre TLS y adentro va el SSH directo,
+sin payload.
+
+El cert es **self-signed, generado por SNI al vuelo** (un leaf con
+`SAN = ServerName` del ClientHello, firmado por una CA interna que se
+persiste). El cliente conecta con `allowInsecure` (no valida la cadena):
+esta capa TLS es **camuflaje, no autenticación** — el cifrado/auth reales
+los da el SSH de adentro (el uuid como credencial).
+
+```
+# modo manual, TLS con CA persistida
+gpm serve -addr :443 -tls -tls-ca tls_ca.pem -users users.json
+
+# probar el endpoint
+openssl s_client -connect HOST:443 -servername www.microsoft.com
+```
+
+En `-config`, los campos son `"tls": true` (+ `"tlsCa": "..."`), y en el
+bloque `panel`, `"tlsSync": true` (default) sincroniza el modo TLS en
+caliente contra el campo `tls` de `/api/v2/server/config` — igual que
+`cdnSync`/`behind_cdn`, un cambio no reinicia el listener. El SNI que
+manda el cliente lo define el panel en el campo `sni` del nodo.
 
 ## Seguridad
 

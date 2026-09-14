@@ -148,6 +148,21 @@ func (s *PanelUserStore) FetchNodeCdn(ctx context.Context) (int, error) {
 	return 200, nil
 }
 
+// FetchNodeTls lee /api/v2/server/config y devuelve si el nodo está en modo
+// TLS ("stunnel embebido", campo tls). Booleano JSON estricto (true/false,
+// NO 0/1 -- Go falla el unmarshal si llega numérico), default false del lado
+// panel, mismo tratamiento que behind_cdn. Pensado para pasarse como
+// Options.TLSProvider en server.Run.
+func (s *PanelUserStore) FetchNodeTls(ctx context.Context) (bool, error) {
+	var body struct {
+		TLS bool `json:"tls"`
+	}
+	if err := s.getJSON(ctx, "/api/v2/server/config", &body); err != nil {
+		return false, err
+	}
+	return body.TLS, nil
+}
+
 func (s *PanelUserStore) pullLoop(ctx context.Context) {
 	ticker := time.NewTicker(s.cfg.PullInterval)
 	defer ticker.Stop()

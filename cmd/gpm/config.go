@@ -23,6 +23,18 @@ type fileConfig struct {
 	// WebSocket) -- ver Options.DecoyStatus en internal/server.
 	Cdn *bool `json:"cdn,omitempty"`
 
+	// Tls activa la capa "stunnel embebido": envuelve cada conexión en TLS
+	// 1.3 con SNI (cert self-signed por SNI al vuelo, el cliente conecta con
+	// allowInsecure) -- reemplaza al señuelo. Default false (nil = false). En
+	// modo panel se puede sincronizar en caliente contra el campo "tls" del
+	// nodo (ver Panel.TlsSync); este valor es solo el arranque en ese caso.
+	Tls *bool `json:"tls,omitempty"`
+	// TlsCAPath es el archivo PEM donde persistir la CA self-signed que firma
+	// los leaf por SNI (0600, recomendado /etc/gpm/<nodeId>/tls_ca.pem).
+	// Vacío = CA efímera (nueva en cada arranque; da igual, el cliente no
+	// valida la cadena).
+	TlsCAPath string `json:"tlsCa,omitempty"`
+
 	// Modo manual (mutuamente excluyente con Panel).
 	UsersPath string `json:"users,omitempty"`
 
@@ -49,6 +61,11 @@ type filePanelConfig struct {
 	// arriba en este archivo y nunca se vuelve a consultar. Reusa
 	// PortCheckInterval (mismo endpoint).
 	CdnSync *bool `json:"cdnSync,omitempty"`
+	// TlsSync (default true) sincroniza en caliente si el nodo termina TLS o
+	// no contra el campo "tls" del panel (/api/v2/server/config) -- si es
+	// false, se usa el "tls" fijo de más arriba en este archivo y nunca se
+	// vuelve a consultar. Reusa PortCheckInterval (mismo endpoint).
+	TlsSync *bool `json:"tlsSync,omitempty"`
 }
 
 func loadFileConfig(path string) (*fileConfig, error) {
