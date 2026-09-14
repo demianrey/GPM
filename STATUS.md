@@ -116,6 +116,107 @@ mostraba). Fix del lado Go: `streamSettings` siempre no-nil con todos los
 sub-objetos que Swift espera, y sin `omitempty` en los campos de
 `SSHClientConfig`.
 
+## stunnel embebido (TLS + SNI): CONTRATO entre GPM, panel y cliente
+
+**Estado: PROPUESTA acordada, todavía NO implementada en ningún lado.**
+Esta sección es el contrato compartido para que las tres sesiones (esta =
+GPM/server, la del panel `v2board_mod`, y la del core del cliente
+Android/iOS) implementen lo mismo sin pisarse. Cualquier cambio a lo de
+acá hay que reflejarlo en las tres.
+
+### Qué es y por qué
+
+Tercera técnica de camuflaje, además del señuelo HTTP-like y udpgw, y
+como esas, **embebida en el mismo binario** (sin depender de un `stunnel`
+externo, para no perder control de lo que se reporta al panel). Envuelve
+la conexión GPM en una capa **TLS 1.3 con SNI**, de modo que en el cable
+el tráfico es indistinguible de una navegación HTTPS real hacia el
+dominio del SNI. Reemplaza al señuelo HTTP-like: con SNI el camuflaje ya
+lo da el "HTTPS", meter el señuelo adentro sería redundante y agregaría
+superficie de detección.
+
+### Decisión sobre go-tunnel (referencia, NO dependencia)
+
+Se evaluó `github.com/opencoff/go-tunnel` (reemplazo genérico de stunnel,
+~4500 líneas). **No se vendoriza ni se importa** -- trae QUIC, SOCKS,
+ratelimits, proxy-protocol, YAML, client certs, etc, nada de lo cual
+usamos, y arrastraría un árbol de dependencias enorme (quic-go incluido)
+para lo que en realidad son ~15 líneas de `crypto/tls` de stdlib
+(`tls.Server(conn, cfg).Handshake()` + un `GetCertificate` para SNI).
+Sirve como referencia conceptual, no como código.
+
+### Layering en el cable
+
+TLS es la capa MÁS externa. Se envuelve la `net.Conn` recién aceptada en
+`tls.Server()` ANTES del `Peek`/señuelo actual (`handleConn`), así todo
+lo de abajo (detección SSH, handshake real, udpgw, medición por uuid)
+funciona sin cambios -- solo recibe una conn ya descifrada.
+
+```
+[ TLS 1.3 + SNI ]  ← nuevo, opcional por nodo, REEMPLAZA al señuelo
+     └─ [ SSH real / udpgw ]  ← ya existe, intacto
+```
+
+Cuando un nodo está en modo TLS, NO se corre el señuelo HTTP-like (son
+modos mutuamente excluyentes por nodo, no se apilan).
+
+### Certificados: self-signed, sin validación del cliente
+
+Decisión tomada: el cliente conecta en modo **inseguro
+(`allowInsecure`/`InsecureSkipVerify`)**, NO valida la cadena. Por lo
+tanto GPM NO necesita dominio real, ni Let's Encrypt, ni gestión de
+certs. Genera un self-signed él mismo, igual que ya hace con la host key
+SSH (`loadOrCreateHostKey`).
+
+Estrategia elegida: **cert self-signed por SNI, generado al vuelo y
+cacheado** vía `tls.Config.GetCertificate`. Cuando llega un ClientHello
+con `ServerName: X`, GPM emite en el momento un leaf con `SAN=X` (firmado
+por una CA self-signed interna persistida en `/etc/gpm/<id>/`) y lo
+cachea en memoria. Mejor camuflaje que un cert fijo: si un DPI compara el
+SNI del ClientHello contra el `SAN` del certificado, coinciden. Costo
+operativo cero (no hay que conseguir cert para cada dominio-carnada).
+
+### Contrato del link de suscripción (reusar convención Xray)
+
+El core del cliente iOS es un fork de **Xray-core**, que YA entiende
+`streamSettings.security=tls` + `tlsSettings.serverName` +
+`tlsSettings.allowInsecure`. **NO inventar params nuevos** (`tls=1&sni=`):
+el panel emite el nodo SSH con esos `streamSettings` estándar, y el
+cliente reusa su capa TLS existente conectada al outbound SSH, en vez de
+escribir un parser nuevo. Concretamente el link/JSON del nodo lleva:
+
+- `security: "tls"` (vs sin TLS = comportamiento actual con señuelo)
+- `serverName: <dominio-SNI-carnada>` (lo que ve el DPI)
+- `allowInsecure: true`
+
+### Responsabilidades por componente
+
+- **GPM (este repo):** envolver en `tls.Server()` en el accept loop de
+  `Run` cuando el nodo esté en modo TLS; `GetCertificate` self-signed por
+  SNI + CA persistida; nuevo campo en `config.json` (`"tls": true` o
+  bloque); sincronizar el flag desde el panel EN CALIENTE con el mismo
+  patrón atómico que `behind_cdn` (cambio no reinicia el listener). El
+  campo `sni` que ya existe reservado en el panel encaja acá.
+- **Panel (`v2board_mod`):** guardar el flag TLS + el SNI en la tabla del
+  nodo GPM; exponerlo en `GET /api/v2/server/config` (junto a
+  `server_port`/`behind_cdn`) para que GPM lo lea; emitir el nodo en la
+  suscripción con `streamSettings.security=tls` + `serverName` +
+  `allowInsecure` según lo de arriba.
+- **Cliente core (Android exclave-core / iOS Xray-core):** conectar la
+  capa TLS existente del stream al outbound SSH cuando `security=tls`;
+  `allowInsecure=true`; mandar el SNI en el ClientHello. Cuidado con el
+  decoder Swift (ver sección iOS): cualquier campo nuevo que se agregue
+  al JSON del nodo tiene que ser opcional o venir siempre presente, o
+  rompe la decodificación de TODO el array de outbounds.
+
+### Orden de trabajo acordado
+
+1. Este contrato (hecho, en este archivo).
+2. GPM server (autónomo, no depende de nadie -- testeable con
+   `openssl s_client -servername` o un cliente Go mínimo).
+3. Cliente core (long pole, prueba contra el GPM del paso 2).
+4. Panel (capa más fina, depende del formato final del link).
+
 ## Pendiente / conocido
 
 - **Nodo de AWS con `node_id` compartido con producción**: un servidor de
@@ -125,8 +226,10 @@ sub-objetos que Swift espera, y sin `omitempty` en los campos de
   separado ("GPM-test", su propio `node_id`); falta corregir el
   `config.json` de ese servidor para que use el ID correcto en vez del de
   producción.
-- **Campo `sni`** existe en el panel (reservado para una futura capa TLS)
-  pero no implementado de este lado.
+- **Campo `sni` / capa TLS (stunnel embebido)**: contrato acordado entre
+  las tres sesiones (ver sección "stunnel embebido (TLS + SNI)" arriba),
+  todavía SIN implementar en ningún lado. El campo `sni` del panel se
+  reusa para esto.
 - **`UniProxy/alive`/`alivelist`** (reporte de usuarios online) --
   implementado del lado panel (`CacheKey SERVER_GPM_ONLINE_USER`), no
   implementado del lado GPM todavía.
