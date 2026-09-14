@@ -118,12 +118,14 @@ sub-objetos que Swift espera, y sin `omitempty` en los campos de
 
 ## stunnel embebido (TLS + SNI): CONTRATO entre GPM, panel y cliente
 
-**Estado: las CUATRO partes HECHAS (server v0.1.5, panel desplegado, iOS
-y Android). Falta SOLO la prueba end-to-end con tráfico real contra un
-`gpm -tls` desplegado.** Esta sección es el contrato compartido entre las
-tres sesiones (esta = GPM/server, la del panel `v2board_mod`, y la del
-core del cliente Android/iOS); cualquier cambio hay que reflejarlo en las
-tres.
+**Estado: COMPLETO y verificado end-to-end con TRÁFICO REAL (2026-09-14).**
+Las cuatro partes hechas (server v0.1.5, panel desplegado, iOS, Android) y
+probadas con la app real contra el nodo 2 (`aws1:443`, TLS): handshake
+TLS 1.3 + SNI → auth SSH por uuid → forwarding TCP → UDP por udpgw
+embebido → push de consumo al panel, atribuido a la fila propia del nodo 2
+(`server_id=2`, sin mezclarse con el nodo 1). Esta sección es el contrato
+compartido entre las tres sesiones (GPM/server, panel `v2board_mod`, core
+Android/iOS); cualquier cambio hay que reflejarlo en las tres.
 
 Confirmado por la sesión del core: **el cliente NO necesita tocar
 `proxy/ssh/client.go` en ninguno de los dos cores.** El `internet.Dial`
@@ -357,18 +359,27 @@ que en el resto de los protocolos del panel).
 2. GPM server -- HECHO y verificado (`openssl s_client -servername` da
    cert con SAN = SNI; banner SSH dentro del TLS; sin regresión en modo
    señuelo).
-3. Cliente core: **iOS y Android HECHOS** (`tls=1`, streamSettings
-   directo en los dos). Host-key check: RESPONDIDO (acepta cualquiera; ver
-   Seguridad). Falta la prueba end-to-end con tráfico real (TLS real +
-   banner SSH adentro) contra un `gpm -tls`.
+3. Cliente core: **iOS y Android HECHOS y verificados con tráfico real**
+   (`tls=1`, streamSettings directo en los dos). Bug extra que solo el
+   tráfico real expuso (no el parseo): guard viejo en `Client.Process()`
+   de Android rechazaba todo outbound con `SecurityType != ""` ("tls
+   enabled") -- TLS fallaba al primer byte; iOS no lo tenía. Arreglado
+   (rechaza solo si el security NO es TLS). Host-key check: RESPONDIDO
+   (acepta cualquiera; ver Seguridad).
 4. Panel -- HECHO y desplegado (commit `bc672b17`): columna `tls`, form
    con selector de modo + validación de exclusividad, `tls` en
    `/api/v2/server/config`, `tls=1&sni=` en `buildGpmUri()`.
+5. **Prueba end-to-end con tráfico real -- HECHA (2026-09-14).** Nodo 2
+   (`gpm@2` en aws1:443, TLS): la app real conectó, TCP (ifconfig.me,
+   dns.google) + UDP (udpgw) OK, consumo reportado al panel en la fila
+   propia del nodo (`server_id=2`, sin mezclarse con nodo 1). El core
+   además lo confirmó con su propio harness SOCKS→SSH+TLS (TCP+UDP).
 
 Release del server: **v0.1.5** (binarios linux amd64/arm64 en el release
-de GitHub). Contrato completo en las cuatro partes (server, panel, iOS,
-Android). Falta SOLO la prueba end-to-end con tráfico real contra un
-`gpm -tls` desplegado.
+de GitHub). **Feature COMPLETO y cerrado en las cuatro partes, con e2e de
+tráfico real verificado.** Único pendiente OPCIONAL: toggle en caliente
+del campo `tls` desde el admin (confirmar que GPM lo toma sin reiniciar el
+listener) -- lo coordinan panel + este server cuando Demian quiera.
 
 ## Pendiente / conocido
 
