@@ -82,13 +82,26 @@ type Options struct {
 	// Kick, que es lo que hace PanelUserStore al perder de vista un uuid
 	// en un pull).
 	Conns *ConnRegistry
-	// DecoyStatus es el status HTTP que se responde al señuelo: 101 (default,
-	// 0 se trata como 101) para nodos detrás de un CDN tipo Cloudflare, que
-	// solo pasa a modo túnel crudo si ve ese status -- o 200 para conexión
-	// directa sin CDN, donde no hay nada esperando un upgrade a WebSocket y
-	// un 200 llano es el camuflaje más discreto (mismo criterio que usan
-	// proxy.py/open.py de SSHPlus, que traen uno u otro según el modo).
+	// DecoyStatus es el status HTTP inicial que se responde al señuelo: 101
+	// (default, 0 se trata como 101) para nodos detrás de un CDN tipo
+	// Cloudflare, que solo pasa a modo túnel crudo si ve ese status -- o 200
+	// para conexión directa sin CDN, donde no hay nada esperando un upgrade
+	// a WebSocket y un 200 llano es el camuflaje más discreto (mismo
+	// criterio que usan proxy.py/open.py de SSHPlus, que traen uno u otro
+	// según el modo). Si DecoyStatusProvider no es nil, este valor es solo
+	// el arranque -- se pisa con lo que devuelva el provider en el primer
+	// chequeo.
 	DecoyStatus int
+	// DecoyStatusProvider, si no es nil, se consulta cada
+	// DecoyStatusCheckInterval para saber si el nodo debe responder 101 o
+	// 200 -- ej. leyendo el campo "behind_cdn" de /api/v2/server/config del
+	// panel (ver PanelUserStore.FetchNodeCdn), igual patrón que
+	// PortProvider. A diferencia del puerto, un cambio acá no reinicia el
+	// listener: aplica de inmediato en la próxima conexión nueva.
+	DecoyStatusProvider func(ctx context.Context) (int, error)
+	// DecoyStatusCheckInterval: cada cuánto consultar DecoyStatusProvider.
+	// Default 60s.
+	DecoyStatusCheckInterval time.Duration
 }
 
 // ConnRegistry rastrea qué conexiones SSH activas corresponden a cada uuid,
@@ -250,6 +263,26 @@ func Run(opts Options) error {
 		return fmt.Errorf("Options.Addr inválido (%q): %w", opts.Addr, err)
 	}
 
+	// decoyStatus es atómico porque, a diferencia del puerto, un cambio acá
+	// NO reinicia el listener -- cada conexión nueva simplemente lee el
+	// valor vigente al armar su respuesta al señuelo (ver handleConn), así
+	// que el cambio aplica de inmediato sin cortar nada.
+	decoyStatus := &atomic.Int32{}
+	initDecoy := opts.DecoyStatus
+	if initDecoy == 0 {
+		initDecoy = 101
+	}
+	decoyStatus.Store(int32(initDecoy))
+	if opts.DecoyStatusProvider != nil {
+		interval := opts.DecoyStatusCheckInterval
+		if interval <= 0 {
+			interval = 60 * time.Second
+		}
+		runCtx, runCancel := context.WithCancel(context.Background())
+		defer runCancel()
+		go watchDecoyStatus(runCtx, opts.DecoyStatusProvider, decoyStatus, interval)
+	}
+
 	for {
 		addr := net.JoinHostPort(host, port)
 		listener, err := net.Listen("tcp", addr)
@@ -266,7 +299,7 @@ func Run(opts Options) error {
 					acceptErrCh <- err
 					return
 				}
-				go handleConn(rawConn, config, usage, conns, opts.UdpgwAddr, opts.DecoyStatus)
+				go handleConn(rawConn, config, usage, conns, opts.UdpgwAddr, int(decoyStatus.Load()))
 			}
 		}()
 
@@ -309,6 +342,34 @@ func Run(opts Options) error {
 // vuelve a lanzar un watchPort fresco al reiniciar el listener). Errores de
 // PortProvider se loguean y se ignoran -- un panel caído momentáneamente no
 // debe tirar el servidor.
+// watchDecoyStatus sincroniza en caliente si el nodo responde 101 (CDN) o
+// 200 (directo) contra provider (ver PanelUserStore.FetchNodeCdn) -- a
+// diferencia de watchPort, nunca reinicia nada: solo actualiza el valor
+// atómico que cada conexión nueva lee en handleConn.
+func watchDecoyStatus(ctx context.Context, provider func(context.Context) (int, error), current *atomic.Int32, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			status, err := provider(ctx)
+			if err != nil {
+				log.Println("GPM: error consultando modo CDN del panel:", err)
+				continue
+			}
+			if status != 101 && status != 200 {
+				continue
+			}
+			if int32(status) != current.Load() {
+				log.Println("GPM: el panel cambió el modo del señuelo a", status)
+				current.Store(int32(status))
+			}
+		}
+	}
+}
+
 func watchPort(ctx context.Context, provider func(context.Context) (int, error), current string, interval time.Duration, ch chan<- string) {
 	if interval <= 0 {
 		interval = 60 * time.Second

@@ -129,6 +129,25 @@ func (s *PanelUserStore) FetchNodePort(ctx context.Context) (int, error) {
 	return body.ServerPort, nil
 }
 
+// FetchNodeCdn lee /api/v2/server/config y devuelve 101 si el nodo está
+// marcado "detrás de CDN" en el panel (campo behind_cdn, booleano JSON,
+// default true del lado panel -- NO es "cdn", nombre distinto a propósito
+// del lado panel para no confundirlo con nada que viaje en el link de
+// suscripción) o 200 si no. Pensado para pasarse como
+// Options.DecoyStatusProvider en server.Run.
+func (s *PanelUserStore) FetchNodeCdn(ctx context.Context) (int, error) {
+	var body struct {
+		BehindCDN bool `json:"behind_cdn"`
+	}
+	if err := s.getJSON(ctx, "/api/v2/server/config", &body); err != nil {
+		return 0, err
+	}
+	if body.BehindCDN {
+		return 101, nil
+	}
+	return 200, nil
+}
+
 func (s *PanelUserStore) pullLoop(ctx context.Context) {
 	ticker := time.NewTicker(s.cfg.PullInterval)
 	defer ticker.Stop()

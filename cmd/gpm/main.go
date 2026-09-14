@@ -238,6 +238,12 @@ func serveFromConfig(path string) {
 				}
 			}
 		}
+
+		cdnSync := p.CdnSync == nil || *p.CdnSync
+		if cdnSync {
+			opts.DecoyStatusProvider = panelStore.FetchNodeCdn
+			opts.DecoyStatusCheckInterval = portCheck
+		}
 	}
 
 	if err := server.Run(opts); err != nil {

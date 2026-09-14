@@ -43,6 +43,12 @@ type filePanelConfig struct {
 	PushInterval      string `json:"pushInterval,omitempty"`      // ej. "60s"
 	PortSync          *bool  `json:"portSync,omitempty"`          // default true
 	PortCheckInterval string `json:"portCheckInterval,omitempty"` // ej. "60s"
+	// CdnSync (default true) sincroniza en caliente si el nodo responde 101
+	// o 200 al señuelo contra el campo "behind_cdn" del panel
+	// (/api/v2/server/config) -- si es false, se usa el "cdn" fijo de más
+	// arriba en este archivo y nunca se vuelve a consultar. Reusa
+	// PortCheckInterval (mismo endpoint).
+	CdnSync *bool `json:"cdnSync,omitempty"`
 }
 
 func loadFileConfig(path string) (*fileConfig, error) {
