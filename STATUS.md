@@ -118,11 +118,12 @@ sub-objetos que Swift espera, y sin `omitempty` en los campos de
 
 ## stunnel embebido (TLS + SNI): CONTRATO entre GPM, panel y cliente
 
-**Estado: GPM (server) IMPLEMENTADO y verificado end-to-end. Panel y
-cliente: pendientes.** Esta sección es el contrato compartido para que
-las tres sesiones (esta = GPM/server, la del panel `v2board_mod`, y la
-del core del cliente Android/iOS) implementen lo mismo sin pisarse.
-Cualquier cambio a lo de acá hay que reflejarlo en las tres.
+**Estado: las CUATRO partes HECHAS (server v0.1.5, panel desplegado, iOS
+y Android). Falta SOLO la prueba end-to-end con tráfico real contra un
+`gpm -tls` desplegado.** Esta sección es el contrato compartido entre las
+tres sesiones (esta = GPM/server, la del panel `v2board_mod`, y la del
+core del cliente Android/iOS); cualquier cambio hay que reflejarlo en las
+tres.
 
 Confirmado por la sesión del core: **el cliente NO necesita tocar
 `proxy/ssh/client.go` en ninguno de los dos cores.** El `internet.Dial`
