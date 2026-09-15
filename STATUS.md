@@ -282,7 +282,10 @@ rama propia de GPM, no el payload de v2node.)
   `sni` cuando `tls=1`. Exclusividad señuelo/TLS: el admin la RECHAZA al
   guardar (no vacía campos en silencio, para no borrar una plantilla de
   señuelo afinada); el form muestra selector de modo y esconde lo que no
-  aplica (incluido `behind_cdn`). Lo que sigue del contrato original:
+  aplica (incluido `behind_cdn`). Un `sni` guardado SÍ sobrevive a apagar
+  `tls` (commit `42f4e5fa`): se conserva en la fila y `buildGpmUri()`
+  simplemente no lo emite -- lo que se rechaza sigue siendo señuelo+TLS
+  juntos (el caso realmente ambiguo). Lo que sigue del contrato original:
   (1) agregar un **booleano propio** `tls` en
   la tabla del nodo GPM -- NO derivar el modo de "sni no vacío" (así el
   admin puede apagar TLS sin perder el SNI escrito, y se permite TLS sin
