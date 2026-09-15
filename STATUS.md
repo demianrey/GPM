@@ -262,7 +262,15 @@ rama propia de GPM, no el payload de v2node.)
   (campo `tls` de `/api/v2/server/config`) con el mismo patrón atómico
   que `behind_cdn` -- un cambio NO reinicia el listener. Verificado
   end-to-end: TLS 1.3, cert con SAN = SNI pedido, banner SSH fluyendo
-  dentro del TLS; modo sin-TLS sin regresión.
+  dentro del TLS; modo sin-TLS sin regresión. **Hot-sync del modo TLS
+  medido en producción de prueba (2026-09-14, nodo 2):** apagar `tls` en
+  el panel → GPM lo tomó en ~55s (≤60s, el `portCheckInterval`), SIN
+  reiniciar el listener y SIN cortar la sesión activa (no hubo
+  `desconectado`); prenderlo de vuelta → ~56s, conexiones nuevas vuelven a
+  TLS. IMPORTANTE, contraste con el puerto: cambiar el PUERTO corta todo
+  (reinicia el listener + `KickAll`, ver sección "Kick-on-..."); cambiar
+  el MODO TLS no corta nada (solo afecta conexiones nuevas). `tls` y
+  `port` se comportan distinto ante un cambio en caliente, a propósito.
 - **Panel (`v2board_mod`) -- HECHO y desplegado (commit `bc672b17`):**
   `/api/v2/server/config?node_id=<id>&node_type=GPM` ya devuelve `tls`
   (booleano JSON estricto, columna int + cast `(bool)` a la salida, mismo
