@@ -6,12 +6,20 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/demianrey/GPM/internal/server"
 )
+
+// version la inyecta el build del release con
+// -ldflags="-X main.version=<tag>" (ver .github/workflows/build.yml). En un
+// build local queda en "dev" -- útil para distinguir un binario compilado a
+// mano de uno bajado de un release.
+var version = "dev"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -28,6 +36,8 @@ func main() {
 		cmdDelUser(os.Args[2:])
 	case "listusers":
 		cmdListUsers(os.Args[2:])
+	case "version", "-v", "--version":
+		fmt.Printf("gpm %s (%s/%s, %s)\n", version, runtime.GOOS, runtime.GOARCH, runtime.Version())
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -49,6 +59,9 @@ Uso (modo manual, archivo de usuarios local):
 Uso (modo panel, sincronizado contra v2board -- ver README):
   gpm serve -addr :80 -panel-url https://tu-panel.com \
       -panel-node-id 1 -panel-token TU_API_KEY [-hostkey host_key.pem]
+
+Otros:
+  gpm version
 
 Ver README.md para el formato del payload/señuelo y cómo apuntar un perfil
 SSH de la app a un servidor GPM.
@@ -79,6 +92,12 @@ func cmdServe(args []string) {
 	panelTLSSync := fs.Bool("panel-tls-sync", true, "modo panel: sincronizar en caliente el modo TLS del nodo contra el campo \"tls\" de /api/v2/server/config")
 	panelPortCheck := fs.Duration("panel-port-check-interval", 60*time.Second, "modo panel: cada cuánto consultar el puerto del nodo en el panel")
 	fs.Parse(args)
+
+	// Primera línea del log de cada arranque: saber qué binario está
+	// corriendo un nodo sin tener que ir a preguntarle al proceso (en un VPS
+	// con varios nodos compartiendo /usr/local/bin/gpm, es la forma de
+	// confirmar que un swap de binario efectivamente se aplicó).
+	log.Printf("GPM %s (%s/%s) arrancando", version, runtime.GOOS, runtime.GOARCH)
 
 	if *configPath != "" {
 		serveFromConfig(*configPath)

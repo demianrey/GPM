@@ -36,7 +36,15 @@ jobs:
           CGO_ENABLED: 0
         run: |
           mkdir -p dist
-          go build -trimpath -ldflags="-s -w" -o dist/gpm-linux-${{ matrix.goarch }} ./cmd/gpm
+          # La versión se inyecta en el binario (gpm version / primera línea
+          # del log de cada arranque): el tag en un release, main-<sha> en un
+          # build de rama.
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            VERSION="$GITHUB_REF_NAME"
+          else
+            VERSION="main-$(git rev-parse --short HEAD)"
+          fi
+          go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o dist/gpm-linux-${{ matrix.goarch }} ./cmd/gpm
 
       - uses: actions/upload-artifact@v4
         with:

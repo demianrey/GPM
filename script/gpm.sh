@@ -61,6 +61,24 @@ before_show_menu() {
     show_menu "$NODE"
 }
 
+# gpm_version_string imprime la versión del binario instalado. Un binario
+# anterior a v0.1.7 no tiene el subcomando (la versión se empezó a inyectar
+# por ldflags en el build del release ahí), así que se distingue ese caso en
+# vez de mostrar algo vacío.
+gpm_version_string() {
+    if [[ ! -x /usr/local/bin/gpm ]]; then
+        echo "no instalado"
+        return
+    fi
+    local v
+    v=$(/usr/local/bin/gpm version 2>/dev/null)
+    if [[ -z "$v" ]]; then
+        echo "desconocida (binario previo a v0.1.7 -- actualizá con: gpm-cli update)"
+    else
+        echo "$v"
+    fi
+}
+
 status_line() {
     if systemctl is-active --quiet "$(svc "$1")"; then
         echo -e "Estado: ${green}corriendo${plain}"
@@ -166,10 +184,23 @@ add_node() {
 }
 
 update() {
-    curl -fsSL -o /usr/local/bin/gpm.new "https://github.com/${REPO}/releases/latest/download/gpm-linux-$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')" \
-        && mv /usr/local/bin/gpm.new /usr/local/bin/gpm && chmod +x /usr/local/bin/gpm \
-        && echo -e "${green}Binario actualizado.${plain} Reinicia cada nodo (gpm-cli restart <id>) para aplicar." \
-        || echo -e "${red}Falló la descarga.${plain}"
+    local before after
+    before=$(gpm_version_string)
+    echo -e "Versión actual: ${yellow}${before}${plain}"
+    if curl -fsSL -o /usr/local/bin/gpm.new "https://github.com/${REPO}/releases/latest/download/gpm-linux-$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')" \
+        && chmod +x /usr/local/bin/gpm.new \
+        && mv /usr/local/bin/gpm.new /usr/local/bin/gpm; then
+        after=$(gpm_version_string)
+        echo -e "Versión nueva:  ${green}${after}${plain}"
+        if [[ "$before" == "$after" ]]; then
+            echo -e "${yellow}Ya estabas en la última versión -- no hace falta reiniciar nada.${plain}"
+        else
+            echo -e "${green}Binario actualizado.${plain} Reinicia cada nodo (gpm-cli restart <id>) para aplicar -- OJO: el binario lo comparten todos los nodos de este VPS."
+        fi
+    else
+        rm -f /usr/local/bin/gpm.new
+        echo -e "${red}Falló la descarga -- el binario en uso NO se tocó.${plain}"
+    fi
     [[ $# == 0 ]] && before_show_menu
 }
 
@@ -188,7 +219,8 @@ uninstall_node() {
 }
 
 show_version() {
-    /usr/local/bin/gpm -h 2>&1 | head -1
+    echo -e "Binario instalado: ${green}$(gpm_version_string)${plain}"
+    echo -e "Ruta: /usr/local/bin/gpm (compartido por todos los nodos de este VPS)"
     [[ $# == 0 ]] && before_show_menu
 }
 
@@ -197,6 +229,7 @@ show_menu() {
     echo -e "
   ${green}Administración de GPM -- nodo ${NODE}${plain}
 --- https://github.com/${REPO} ---
+  Binario: ${green}$(gpm_version_string)${plain}
   ${green}0.${plain} Editar configuración de este nodo (reinicia solo)
   ${green}t.${plain} Ver/cambiar Communication Key de este nodo
 ————————————————
@@ -214,10 +247,11 @@ show_menu() {
   ${green}8.${plain} Habilitar arranque automático
   ${green}9.${plain} Deshabilitar arranque automático
 ————————————————
+  ${green}v.${plain} Ver versión instalada
   ${green}10.${plain} Salir
  "
     status_line "$NODE"
-    echo && read -rp "Elige una opción [0-10]: " num
+    echo && read -rp "Elige una opción [0-10, t, l, u, v]: " num
     case "${num}" in
         0) config "$NODE" ;;
         t) token "$NODE" ;;
@@ -232,6 +266,7 @@ show_menu() {
         7) show_log "$NODE" ;;
         8) enable "$NODE" ;;
         9) disable "$NODE" ;;
+        v) show_version ;;
         10) exit 0 ;;
         *) echo -e "${red}Opción inválida${plain}" && before_show_menu ;;
     esac

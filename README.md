@@ -110,12 +110,19 @@ gpm-cli 1                # menú directo del nodo 1
 gpm-cli restart 1         # o por subcomando: start/stop/restart/status/log/enable/disable/config/token/uninstall [node_id]
 gpm-cli list              # estado de todos los nodos instalados
 gpm-cli add                # da de alta otro nodo (re-corre install.sh)
+gpm-cli version           # versión del binario instalado (también en la cabecera del menú)
+gpm-cli update            # baja el último release y muestra versión anterior → nueva
 ```
 
 `gpm-cli config <id>` abre `/etc/gpm/<id>/config.json` con `nano` (o
 `$EDITOR` si está seteado) y reinicia ese nodo al guardar. `gpm-cli token
 <id>` muestra y permite cambiar el Communication Key de ese nodo sin editar
-archivos a mano. `gpm-cli log <id>` sigue `journalctl -u gpm@<id> -f` en
+archivos a mano. La versión del binario se ve en la cabecera del menú, con
+`gpm-cli version`, y en la primera línea del log de cada arranque
+(`GPM v0.1.7 (linux/amd64) arrancando`) — útil para confirmar en un VPS con
+varios nodos que un swap del binario compartido efectivamente se aplicó. Un
+binario anterior a v0.1.7 no trae versión inyectada y se reporta como
+"desconocida". `gpm-cli log <id>` sigue `journalctl -u gpm@<id> -f` en
 vivo. El campo `"portSync"` (default `true`, ver formato abajo) ya viene
 activo -- si cambias el puerto desde el panel, GPM reinicia su propio
 listener solo y actualiza `"addr"` en el `config.json` para que sobreviva
