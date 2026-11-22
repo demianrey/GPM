@@ -86,7 +86,9 @@ bash <(curl -Ls https://raw.githubusercontent.com/demianrey/GPM/main/script/inst
 ```
 
 Pide interactivamente: id del nodo (el mismo `node_id` que tiene en el
-panel), puerto, modo (panel o manual), y si es panel la URL/Communication
+panel), si hay un reverse proxy local delante (ver "Detrás de un reverse
+proxy" más abajo — si lo hay, escucha en loopback y fija el señuelo en
+101), puerto, modo (panel o manual), y si es panel la URL/Communication
 Key. Varios nodos pueden convivir en el mismo VPS: cada `install.sh`
 adicional da de alta uno nuevo sin tocar los que ya corren, todos comparten
 el mismo binario `/usr/local/bin/gpm`.
@@ -278,6 +280,130 @@ sin que el resto del servidor sepa de dónde salen los usuarios.
 - Modo TLS (stunnel embebido): implementado del lado GPM (ver abajo),
   pendiente el wiring del panel (booleano `tls` + params en el link) y del
   cliente (`SSHFmt.kt`). Estado y contrato completo en `STATUS.md`.
+
+## Detrás de un reverse proxy (nginx): compartir el puerto 80
+
+Si en el VPS ya hay un nginx ocupando el `:80` (otro panel, otro nodo, un
+sitio real), GPM puede convivir ahí sin moverse de puerto para el cliente:
+nginx escucha el 80 y hace reverse proxy del señuelo hacia GPM, que
+escucha en loopback.
+
+Esto funciona sin ningún cambio en GPM porque el señuelo HTTP-like **es**
+una petición con `Connection: Upgrade` / `Upgrade: websocket`, y GPM
+contesta `101 Switching Protocols` — exactamente lo que nginx necesita
+para dejar de hablar HTTP y pasar a relay de bytes crudos. Para GPM,
+nginx cumple el mismo rol que un CDN.
+
+```
+cliente ──:80── nginx (location /http9, upgrade) ── 127.0.0.1:18080 ── GPM
+```
+
+nginx (en el `server` que ya tenés en el 80; el mismo bloque sirve si
+además hay un CDN real por delante):
+
+```nginx
+location /http9 {
+    proxy_pass http://127.0.0.1:18080;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade    $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host       $host;
+    proxy_buffering  off;
+    proxy_read_timeout 7d;   # el túnel vive horas: el default de 60s lo corta
+    proxy_send_timeout 7d;
+}
+```
+
+`config.json` del nodo:
+
+```json
+{
+  "addr": "127.0.0.1:18080",
+  "cdn": true,
+  "tls": false,
+  "panel": { "cdnSync": false, "tlsSync": false }
+}
+```
+
+El `"addr"` en loopback es lo que evita que GPM quede alcanzable directo en
+el puerto de servicio, saltándose el proxy (`install.sh` lo escribe así
+solo si contestás que hay un reverse proxy delante; el default, `:<puerto>`,
+bindea todas las interfaces). La interfaz no se sincroniza con el panel a
+propósito: solo el puerto es dinámico, el host del `addr` se conserva.
+
+Y en el panel, en la fila del nodo GPM:
+
+| campo | valor |
+|---|---|
+| `port` | **80** — el que disca el cliente (va al link de suscripción) |
+| `service_port` | **18080** — donde escucha el proceso GPM |
+| `behind_cdn` | **true** |
+| `tls` | 0 |
+| `payload` | una sola etapa, con el path del `location` |
+
+```
+GET /http9 HTTP/1.1[crlf]Host: <host-que-rutea-al-origin>[crlf]Connection: Upgrade[crlf]Upgrade: websocket[crlf][crlf]
+```
+
+### Reglas que no son opcionales
+
+- **El puerto de escucha tiene que venir de `service_port`, no de `port`.**
+  GPM sincroniza su listener contra el `server_port` del panel; si el panel
+  manda ahí el puerto del cliente (80), GPM rebindea al 80 que ya tiene
+  nginx → `bind: address already in use`. Con `service_port` cargado no hay
+  problema: el panel manda 18080 y GPM se queda donde está. En un panel que
+  todavía no tenga ese campo, el equivalente es `"portSync": false` en el
+  bloque `panel` del `config.json` — y ojo, **si esa línea está, hay que
+  sacarla a mano para volver a sincronizar**: con `portSync: false` GPM no
+  instala el sincronizador y no vuelve a consultar el puerto nunca, así que
+  ningún cambio en el panel lo despierta.
+
+  Desde v0.1.6, mientras haya sincronización con el panel un bind fallido
+  **no es fatal**: GPM lo loguea, reintenta cada 10s y se muda al puerto
+  que reporte el panel (persistiéndolo en el `config.json`), en vez de
+  salir con error. Así un nodo que arrancó con un puerto imposible se
+  arregla solo en cuanto el admin carga el `service_port` correcto, sin
+  entrar al VPS. Antes de eso el proceso salía y systemd lo reintentaba en
+  loop para siempre, porque el sincronizador solo arranca después de un
+  listen exitoso.
+- **`behind_cdn` tiene que estar en `true`.** nginx solo tuneliza si ve el
+  `101`; en modo directo GPM responde los dos `200` apilados y nginx da la
+  petición por terminada. `"cdnSync": false` + `"cdn": true` evita que un
+  cambio en el admin baje el nodo sin que nadie haya tocado el servidor.
+- **Sin TLS en este camino.** nginx le manda HTTP en claro al upstream; si
+  se prende `tls`, GPM espera un ClientHello y todas las conexiones mueren.
+  `"tlsSync": false` + `"tls": false` lo fija.
+- **Señuelo de una sola etapa**, sin `[split]`: nginx parsea *una* petición
+  HTTP. Esto significa que este montaje sirve para el caso VPS directa con
+  bug-host (o un CDN real por delante que termine la petición él), no para
+  el domain-fronting de dos saltos hecho por el propio cliente.
+- **El path importa**: es lo que le permite a nginx distinguir el tráfico
+  GPM del resto que vive en ese mismo `:80`. Tiene que coincidir entre el
+  `location` y el `payload` del panel.
+
+Lo único que se pierde es la IP real del cliente en los logs de GPM
+(`conectado: ... desde 127.0.0.1`): nginx en modo HTTP no puede mandar
+PROXY protocol al upstream. No afecta nada funcional — la contabilidad es
+por uuid, no por IP.
+
+### Variante con TLS en el 443
+
+Para el modo TLS el patrón es otro, porque GPM termina su propio TLS y no
+hay que desarmarlo: `stream` + `ssl_preread`, ruteando por SNI.
+
+```nginx
+stream {
+    map $ssl_preread_server_name $backend {
+        <sni-del-nodo>  127.0.0.1:8443;   # GPM con "tls": true
+        default         127.0.0.1:4443;   # el sitio HTTPS real
+    }
+    server { listen 443; proxy_pass $backend; ssl_preread on; }
+}
+```
+
+(con el `server` HTTPS de nginx movido a `listen 127.0.0.1:4443 ssl`).
+Acá sí se podría conservar la IP real con `proxy_protocol on`, pero GPM
+todavía no parsea PROXY protocol.
 
 ## Modo TLS (stunnel embebido)
 

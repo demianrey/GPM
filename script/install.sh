@@ -89,14 +89,42 @@ if [[ -f "${NODE_DIR}/config.json" ]]; then
 fi
 mkdir -p "$NODE_DIR"
 
-read -rp "Puerto donde escuchar [80]: " gpm_port
-gpm_port=${gpm_port:-80}
-read -rp "Dirección udpgw embebida [127.0.0.1:7300, vacío para desactivar]: " udpgw_addr
-read -rp "¿Este nodo está detrás de un CDN tipo Cloudflare? [Y/n]: " gpm_cdn
-if [[ "$gpm_cdn" == "n" || "$gpm_cdn" == "N" ]]; then
-    gpm_cdn_json="false"
+echo
+echo "Si en este VPS hay un nginx (u otro reverse proxy) ocupando el puerto al"
+echo "que conecta el cliente, GPM escucha en loopback detrás de él y ese puerto"
+echo "se carga en el panel como PUERTO DE SERVICIO (service_port), distinto del"
+echo "puerto de conexión. Ver \"Detrás de un reverse proxy\" en el README."
+read -rp "¿Hay un reverse proxy local delante de GPM? [y/N]: " gpm_rp
+if [[ "$gpm_rp" == "y" || "$gpm_rp" == "Y" ]]; then
+    gpm_behind_rp="yes"
 else
+    gpm_behind_rp="no"
+fi
+
+if [[ "$gpm_behind_rp" == "yes" ]]; then
+    read -rp "Puerto de SERVICIO donde escuchar (el que apunta el reverse proxy) [18080]: " gpm_port
+    gpm_port=${gpm_port:-18080}
+    gpm_addr="127.0.0.1:${gpm_port}"
+else
+    read -rp "Puerto donde escuchar [80]: " gpm_port
+    gpm_port=${gpm_port:-80}
+    gpm_addr=":${gpm_port}"
+fi
+read -rp "Dirección udpgw embebida [127.0.0.1:7300, vacío para desactivar]: " udpgw_addr
+if [[ "$gpm_behind_rp" == "yes" ]]; then
+    # Detrás de un reverse proxy el señuelo TIENE que responder 101: nginx solo
+    # pasa a modo túnel crudo si ve ese status (con 200 da la petición por
+    # terminada y no relaya nada). O sea el proxy cumple el mismo rol que un
+    # CDN, así que no se pregunta -- se fija en true.
     gpm_cdn_json="true"
+    echo -e "${yellow}Modo señuelo: 101 (fijo). Detrás de un reverse proxy es obligatorio -- nginx necesita ese status para tunelizar.${plain}"
+else
+    read -rp "¿Este nodo está detrás de un CDN tipo Cloudflare? [Y/n]: " gpm_cdn
+    if [[ "$gpm_cdn" == "n" || "$gpm_cdn" == "N" ]]; then
+        gpm_cdn_json="false"
+    else
+        gpm_cdn_json="true"
+    fi
 fi
 
 if [[ "$gpm_mode" == "2" ]]; then
@@ -104,7 +132,7 @@ if [[ "$gpm_mode" == "2" ]]; then
     [[ -s "${NODE_DIR}/users.json" ]] || echo '{}' > "${NODE_DIR}/users.json"
     cat > "${NODE_DIR}/config.json" <<EOF
 {
-  "addr": ":${gpm_port}",
+  "addr": "${gpm_addr}",
   "hostkey": "${NODE_DIR}/host_key.pem",
   "udpgwAddr": "${udpgw_addr}",
   "cdn": ${gpm_cdn_json},
@@ -120,7 +148,7 @@ else
     chmod 600 "${NODE_DIR}/panel-token"
     cat > "${NODE_DIR}/config.json" <<EOF
 {
-  "addr": ":${gpm_port}",
+  "addr": "${gpm_addr}",
   "hostkey": "${NODE_DIR}/host_key.pem",
   "udpgwAddr": "${udpgw_addr}",
   "cdn": ${gpm_cdn_json},
@@ -138,6 +166,14 @@ systemctl enable "gpm@${node_id}" >/dev/null 2>&1
 systemctl restart "gpm@${node_id}"
 
 sleep 1
+if [[ "$gpm_behind_rp" == "yes" ]]; then
+    echo
+    echo -e "${yellow}Reverse proxy: falta hacer dos cosas FUERA de este instalador:${plain}"
+    echo -e "${yellow}  1) en el panel, cargar ${gpm_port} como puerto de servicio (service_port) del nodo${plain}"
+    echo -e "${yellow}     -- el puerto de conexión sigue siendo el que disca el cliente (el del proxy);${plain}"
+    echo -e "${yellow}  2) en el reverse proxy, apuntar el location/upstream a 127.0.0.1:${gpm_port}${plain}"
+    echo -e "${yellow}     con upgrade de WebSocket y timeouts largos (receta en el README).${plain}"
+fi
 if systemctl is-active --quiet "gpm@${node_id}"; then
     echo -e "\n${green}Nodo ${node_id} instalado y corriendo.${plain} Administralo con: ${green}gpm-cli ${node_id}${plain}"
 else

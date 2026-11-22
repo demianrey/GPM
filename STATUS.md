@@ -392,6 +392,134 @@ tráfico real verificado.** Único pendiente OPCIONAL: toggle en caliente
 del campo `tls` desde el admin (confirmar que GPM lo toma sin reiniciar el
 listener) -- lo coordinan panel + este server cuando Demian quiera.
 
+## Reverse proxy local (nginx) y `service_port`: puerto de conexión ≠ puerto de servicio
+
+**Estado: HECHO y verificado con tráfico real (2026-11-22).** Nodo 3
+(`vtmx3`) corriendo detrás de nginx, compartiendo el `:80` con un v2node
+que ya vivía ahí. Receta de usuario en el README ("Detrás de un reverse
+proxy"); acá va el por qué y el contrato con el panel.
+
+### Por qué funciona sin tocar GPM
+
+El señuelo HTTP-like ya es una petición con `Connection: Upgrade` /
+`Upgrade: websocket`, y GPM responde `101 Switching Protocols` — que es
+exactamente la condición que nginx necesita para pasar a modo túnel
+crudo. O sea **nginx cumple el mismo rol que un CDN** para GPM: el modo
+`behind_cdn` ya existente es el que corresponde, no hace falta un modo
+nuevo. Cero líneas de Go.
+
+Topología verificada (las dos puntas, con sonda externa + app real):
+
+```
+cliente ──:80── CF (opcional) ── nginx :80 (location /http9) ── 127.0.0.1:18080 ── GPM
+```
+
+### El problema real: el panel colapsaba los dos puertos
+
+`GpmController::save()` derivaba `server_port` del mismo `port` que ve el
+cliente (`strtok($port,'-')`), con el supuesto explícito de que "GPM
+escucha directo en el puerto al que se conecta el cliente". Ese supuesto
+deja de valer con un reverse proxy delante, y el efecto no es benigno:
+GPM sincroniza su listener contra `server_port` (`PortProvider` →
+`watchPort` → rebind), así que recibía 80, cerraba el listener, intentaba
+bindear el 80 que tiene nginx → `bind: address already in use` → el
+proceso sale y systemd lo reintenta cada 10s. Y antes de eso
+`Options.OnPortChange` → `persistAddr` **reescribe el `"addr"` del
+`config.json`**, dejándolo roto también para el siguiente arranque.
+
+### Contrato nuevo: `service_port` (panel) — desplegado
+
+Resuelto del lado panel, **sin cambios en GPM ni en el cliente** (commit
+`0e500f9d` de `v2board_mod`):
+
+- columna `service_port` (int, **nullable**) en `v2_server_gpm`;
+- `server_port = service_port ?: strtok(port, '-')` — el fallback deja
+  intactas las filas que ya existían (nodos 1, 2, 3 y los Telcel quedaron
+  en `service_port=NULL`, verificado);
+- `buildGpmUri()` sigue usando `port` (el de conexión), así que el link de
+  suscripción no cambia;
+- `/api/v2/server/config` sigue exponiendo `server_port` igual que
+  siempre (passthrough del atributo del modelo, `UniProxyController`), solo
+  que ahora puede diferir del `port`.
+
+Con eso, **`portSync` se queda en su default `true`** y hace lo correcto
+solo: el panel manda el puerto de servicio real y GPM bindea ahí. El
+workaround de `"portSync": false` en el `config.json` sigue siendo el
+equivalente válido contra un panel sin ese campo.
+
+Lo que `service_port` NO cubre, a propósito: la **interfaz** de escucha
+(`127.0.0.1`) sigue saliendo del `addr` local, porque `watchPort` cambia
+solo el puerto y conserva el host (`server.go:342`). Qué interfaz usar es
+decisión del server, no del panel.
+
+### Dos latches recomendados en el `config.json`
+
+`"cdnSync": false` + `"cdn": true` y `"tlsSync": false` + `"tls": false`.
+No son necesarios para que funcione (el panel ya tiene `behind_cdn=1` y
+`tls=0`), son seguros contra un toggle equivocado en el admin: con
+`behind_cdn=false` GPM pasa a los dos `200` apilados y nginx nunca
+tuneliza; con `tls=true` GPM espera un ClientHello mientras nginx le manda
+HTTP en claro. Detrás de un reverse proxy ninguno de esos dos modos puede
+servir para nada, así que fijarlos es gratis.
+
+### Cero toque para nodos nuevos (v0.1.6)
+
+Con el `service_port` del panel el puerto ya se sincroniza solo, pero
+quedaban dos huecos de este lado que hacían que "cargar el service_port y
+listo" NO fuera verdad para un nodo nuevo. Los dos arreglados en v0.1.6:
+
+1. **`install.sh` bindeaba todas las interfaces.** Escribía
+   `"addr": ":<puerto>"` (host vacío), y como `watchPort` conserva el host
+   y sincroniza solo el puerto (`server.go`), el nodo terminaba en
+   `0.0.0.0:<service_port>` — alcanzable directo desde internet,
+   saltándose el proxy y con él el señuelo y el path. Ahora el instalador
+   pregunta si hay un reverse proxy local delante y, si lo hay, escribe
+   `127.0.0.1:<puerto>`, fija el señuelo en 101 (obligatorio detrás de un
+   proxy, no hay motivo para preguntarlo) y al terminar recuerda las dos
+   cosas que quedan fuera del instalador: cargar el `service_port` en el
+   panel y apuntar el `location` del proxy al loopback.
+2. **Un bind fallido era terminal.** El listener se crea ANTES de arrancar
+   `watchPort`, así que un puerto imposible (el caso típico: el del
+   cliente, ocupado por el nginx que hace de proxy) hacía salir a `Run`
+   con error → systemd reintentando cada 10s para siempre → el
+   `server_port` del panel nunca se aplicaba, porque nunca se llegaba a
+   consultar. Ahora, **mientras haya `PortProvider`**, el bind fallido se
+   loguea y se reintenta cada `bindRetryDelay` (10s): se reintenta el
+   mismo puerto (cubre el conflicto transitorio con otro proceso del VPS
+   que todavía no se asentó — pasó de verdad, ver `LOCAL_NOTES.md`) y, si
+   el panel reporta otro, se migra a ese y se persiste vía
+   `OnPortChange`. En modo manual (sin panel) se conserva el
+   comportamiento viejo a propósito: sale con error visible, porque ahí no
+   hay nada que pueda corregir el puerto solo.
+
+Verificado local contra un panel falso: bind a un puerto ocupado → log del
+fallo → a los 10s consulta → se muda al puerto reportado conservando el
+loopback → `addr` reescrito en el `config.json`. Y modo manual con el
+puerto ocupado: sigue saliendo con exit 1 y el error claro.
+
+Lo que `portSync: false` NO hace es autocurarse: es la decisión de no
+instalar el sincronizador, así que un nodo con esa línea (como quedó el 3
+antes de que existiera `service_port`) necesita que alguien la saque a
+mano una vez. Ningún valor del panel lo puede pisar.
+
+### Verificación hecha (nodo 3)
+
+- Sonda externa a `216.238.78.104:80` y a la IP de CF (`104.18.25.189`)
+  con `Host: vtmx3.demianred.com` y path `/http9`: `101` en los dos casos
+  (`Server: nginx` / `Server: cloudflare`) y banner `SSH-2.0-Go` de vuelta
+  por el túnel. La cadena CF → nginx → GPM funciona entera.
+- Auth por uuid + `direct-tcpip` + tráfico TCP real atravesando nginx
+  (SOCKS→SSH con el señuelo emitido por un `ProxyCommand`).
+- App real (`panel-uid-990`): canales `direct-tcpip` a google/facebook/
+  FCM/DNS + canal **udpgw embebido**, y `panel: consumo reportado para 2
+  usuarios` — la contabilidad por uuid sobrevive al reverse proxy.
+- `/http1` y `/http2` (v2node, mismo nginx) sin regresión.
+
+Única pérdida: la IP real del cliente en los logs (`desde 127.0.0.1`).
+nginx en modo HTTP no puede mandar PROXY protocol al upstream, y GPM no
+lo parsea. No afecta nada funcional: `RemoteAddr()` solo se usa en esa
+línea de log (`server.go:615`), la medición es por uuid.
+
 ## Pendiente / conocido
 
 - **Nodo de AWS con `node_id` compartido con producción**: un servidor de

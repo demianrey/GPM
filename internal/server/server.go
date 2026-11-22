@@ -66,6 +66,13 @@ type Options struct {
 	// proceso (systemd/el operador no tiene que intervenir cuando cambian
 	// el puerto desde el admin). El host (interfaz) de Options.Addr se
 	// mantiene fijo -- solo el puerto es dinámico.
+	//
+	// Además, mientras haya PortProvider un bind fallido no es fatal: Run
+	// reintenta (ver bindRetryDelay) y se muda al puerto que reporte el
+	// panel, en vez de salir con error. Así un nodo que arrancó con un
+	// puerto imposible (ej. el del cliente, ocupado por un reverse proxy
+	// delante) se arregla solo cuando el admin carga el puerto de servicio,
+	// sin entrar a editar el config a mano.
 	PortProvider func(ctx context.Context) (int, error)
 	// PortCheckInterval: cada cuánto consultar PortProvider. Default 60s.
 	PortCheckInterval time.Duration
@@ -342,7 +349,31 @@ func Run(opts Options) error {
 		addr := net.JoinHostPort(host, port)
 		listener, err := net.Listen("tcp", addr)
 		if err != nil {
-			return fmt.Errorf("listen en %s: %w", addr, err)
+			if opts.PortProvider == nil {
+				return fmt.Errorf("listen en %s: %w", addr, err)
+			}
+			// Con el puerto sincronizado contra el panel, un bind fallido NO
+			// es fatal. El caso real que motiva esto: un nodo recién
+			// instalado al que le quedó el puerto del CLIENTE (ej. :80,
+			// ocupado por el nginx que le hace de reverse proxy) en vez del
+			// puerto de servicio. Si acá devolviéramos error, el proceso
+			// saldría, systemd lo reintentaría en loop cada RestartSec y el
+			// puerto del panel NUNCA se aplicaría -- watchPort solo arranca
+			// después de un listen exitoso, así que el nodo quedaría roto
+			// hasta que alguien entre a editar el config.json a mano. En vez
+			// de eso esperamos acá: reintentamos el mismo puerto (cubre el
+			// conflicto transitorio con otro proceso del mismo VPS que
+			// todavía no se asentó) y, si el panel reporta otro, nos mudamos
+			// a ese.
+			log.Printf("listen en %s falló: %v -- reintento en %s (si el panel reporta otro puerto, uso ese)",
+				addr, err, bindRetryDelay)
+			if newPort := awaitBindablePort(opts.PortProvider, port, bindRetryDelay); newPort != port {
+				port = newPort
+				if opts.OnPortChange != nil {
+					opts.OnPortChange(net.JoinHostPort(host, port))
+				}
+			}
+			continue
 		}
 		log.Println("GPM escuchando en", addr, "(protocolo SSH, auth por UUID)")
 
@@ -390,6 +421,35 @@ func Run(opts Options) error {
 			return fmt.Errorf("accept: %w", err)
 		}
 	}
+}
+
+// bindRetryDelay es cuánto se espera antes de reintentar un listen que falló
+// cuando el puerto lo manda el panel (ver Run). Corto a propósito: el
+// conflicto más común es transitorio -- otro proceso del mismo VPS que
+// todavía no se asentó en su puerto definitivo.
+const bindRetryDelay = 10 * time.Second
+
+// awaitBindablePort espera delay y devuelve el puerto con el que conviene
+// reintentar el listen: el que reporta el panel si cambió, o el actual (el
+// conflicto puede haberse resuelto solo mientras esperábamos). Un panel
+// caído no es motivo para dejar de reintentar.
+func awaitBindablePort(provider func(context.Context) (int, error), current string, delay time.Duration) string {
+	time.Sleep(delay)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	p, err := provider(ctx)
+	if err != nil {
+		log.Println("GPM: error consultando el puerto del panel:", err)
+		return current
+	}
+	if p <= 0 || p > 65535 {
+		return current
+	}
+	if next := fmt.Sprint(p); next != current {
+		log.Println("GPM: el panel reporta el puerto", next, "-- reintentando ahí")
+		return next
+	}
+	return current
 }
 
 // watchPort consulta provider cada interval (default 60s) y manda por ch el
