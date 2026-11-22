@@ -92,12 +92,14 @@ start() {
     sleep 1
     status_line "$1"
     [[ $# -lt 2 ]] && before_show_menu
+    return 0
 }
 
 stop() {
     systemctl stop "$(svc "$1")"
     echo -e "${green}Nodo ${1} detenido.${plain}"
     [[ $# -lt 2 ]] && before_show_menu
+    return 0
 }
 
 restart() {
@@ -105,29 +107,34 @@ restart() {
     sleep 1
     status_line "$1"
     [[ $# -lt 2 ]] && before_show_menu
+    return 0
 }
 
 status() {
     systemctl status "$(svc "$1")" --no-pager -l
     [[ $# -lt 2 ]] && before_show_menu
+    return 0
 }
 
 show_log() {
     echo -e "${yellow}Ctrl+C para salir del log en vivo.${plain}"
     journalctl -u "$(svc "$1").service" -e --no-pager -f
     [[ $# -lt 2 ]] && before_show_menu
+    return 0
 }
 
 enable() {
     systemctl enable "$(svc "$1")"
     echo -e "${green}Arranque automático habilitado para el nodo ${1}.${plain}"
     [[ $# -lt 2 ]] && before_show_menu
+    return 0
 }
 
 disable() {
     systemctl disable "$(svc "$1")"
     echo -e "${yellow}Arranque automático deshabilitado para el nodo ${1}.${plain}"
     [[ $# -lt 2 ]] && before_show_menu
+    return 0
 }
 
 config() {
@@ -138,6 +145,7 @@ config() {
     systemctl restart "$(svc "$1")"
     status_line "$1"
     [[ $# -lt 2 ]] && before_show_menu
+    return 0
 }
 
 token() {
@@ -161,6 +169,7 @@ token() {
         status_line "$1"
     fi
     [[ $# -lt 2 ]] && before_show_menu
+    return 0
 }
 
 list_cmd() {
@@ -176,11 +185,13 @@ list_cmd() {
         done <<< "$nodes"
     fi
     [[ $# == 0 ]] && before_show_menu
+    return 0
 }
 
 add_node() {
     bash <(curl -Ls "https://raw.githubusercontent.com/${REPO}/main/script/install.sh")
     [[ $# == 0 ]] && before_show_menu
+    return 0
 }
 
 update() {
@@ -202,6 +213,7 @@ update() {
         echo -e "${red}Falló la descarga -- el binario en uso NO se tocó.${plain}"
     fi
     [[ $# == 0 ]] && before_show_menu
+    return 0
 }
 
 uninstall_node() {
@@ -216,12 +228,14 @@ uninstall_node() {
     echo -e "${yellow}Servicio del nodo ${1} detenido y deshabilitado. Sus archivos (incluido el token) NO se borraron -- bórralos a mano si ya no los necesitas:${plain}"
     echo "  rm -rf ${GPM_DIR}/${1}"
     [[ $# -lt 2 ]] && exit 0
+    return 0
 }
 
 show_version() {
     echo -e "Binario instalado: ${green}$(gpm_version_string)${plain}"
     echo -e "Ruta: /usr/local/bin/gpm (compartido por todos los nodos de este VPS)"
     [[ $# == 0 ]] && before_show_menu
+    return 0
 }
 
 show_menu() {
